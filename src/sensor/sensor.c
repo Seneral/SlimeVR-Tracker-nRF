@@ -402,11 +402,12 @@ void sensor_fusion_invalidate(void) {
 	}
 }
 
-int sensor_update_time_ms = 6;
+int fusion_update_rate = CONFIG_SENSOR_FUSION_ODR;
+int fusion_update_time_us = 1000000 / CONFIG_SENSOR_FUSION_ODR;
 
-// TODO: get rid of it.. ?
-static void set_update_time_ms(int time_ms) {
-	sensor_update_time_ms = time_ms;  // TODO: terrible naming
+static void set_update_divider(int div) {
+	fusion_update_rate = CONFIG_SENSOR_FUSION_ODR / div;
+	fusion_update_time_us = 1000000 / fusion_update_rate;
 }
 
 int main_imu_init(void) {
@@ -432,11 +433,8 @@ int main_imu_init(void) {
 
 	float clock_actual_rate = 0;
 #if CONFIG_USE_SENSOR_CLOCK
-	set_sensor_clock(
-		true,
-		32768,
-		&clock_actual_rate
-	);  // enable the clock source for IMU if present
+	// enable the clock source for IMU if present
+	set_sensor_clock(true, 32768, &clock_actual_rate);
 #endif
 	if (clock_actual_rate != 0) {
 		LOG_INF("Sensor clock rate: %.2fHz", (double)clock_actual_rate);
@@ -445,7 +443,7 @@ int main_imu_init(void) {
 	k_usleep(250); // wait for sensor register reset // TODO: is this needed?
 	float accel_initial_time = 1.0 / CONFIG_SENSOR_ACCEL_ODR; // configure with ~1000Hz ODR
 	float gyro_initial_time = 1.0 / CONFIG_SENSOR_GYRO_ODR; // configure with ~1000Hz ODR
-	float mag_initial_time = sensor_update_time_ms / 1000.0; // configure with ~200Hz ODR
+	float mag_initial_time = 1.0 / CONFIG_SENSOR_MAG_ODR; // configure with ~200Hz ODR
 	err = sensor_imu->init(&sensor_imu_dev, clock_actual_rate, accel_initial_time, gyro_initial_time, &accel_actual_time, &gyro_actual_time);
 	LOG_INF("Accelerometer initial rate: %.2fHz", 1.0 / (double)accel_actual_time);
 	LOG_INF("Gyrometer initial rate: %.2fHz", 1.0 / (double)gyro_actual_time);
@@ -459,8 +457,12 @@ int main_imu_init(void) {
 			&sensor_mag_dev,
 			mag_initial_time,
 			&mag_actual_time
-		);  // configure with ~200Hz ODR
+		);
 		LOG_INF("Magnetometer initial rate: %.2fHz", 1.0 / (double)mag_actual_time);
+		//if (!use_ext_fifo)
+		{ // TODO: Currently polling mag at fusion update rate, not the actual sensor rate
+			mag_actual_time = 1.0f/(float)fusion_update_rate;
+		}
 		if (err < 0) {
 			return err;
 		}
@@ -478,7 +480,7 @@ int main_imu_init(void) {
 	}
 	else
 	{
-		sensor_fusion->init(gyro_actual_time, accel_actual_time, mag_initial_time); // TODO: using initial time since mag are not polled at the actual rate
+		sensor_fusion->init(gyro_actual_time, accel_actual_time, mag_actual_time);
 	}
 
 	// Calibrate IMU
@@ -534,8 +536,11 @@ void main_imu_thread(void) {
 	} else {
 		main_ok = true;
 	}
+
+	last_data_time = k_uptime_get();
+	uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Limit FIFO read to 1024 bytes
 	while (1) {
-		int64_t time_begin = k_uptime_get();
+		uint64_t ticks_begin = k_uptime_ticks();
 		if (main_ok) {
 			// Trigger reconfig on sensor mode change
 			bool reconfig = last_sensor_mode != sensor_mode;
@@ -553,26 +558,11 @@ void main_imu_thread(void) {
 			}
 
 			// Read IMU temperature
-			float temp = sensor_imu->temp_read(&sensor_imu_dev
-			);  // TODO: use as calibration data
+			float temp = sensor_imu->temp_read(&sensor_imu_dev); // TODO: use as calibration data
 			connection_update_sensor_temp(temp);
 
 			// Read gyroscope (FIFO)
-#if CONFIG_SENSOR_USE_LOW_POWER_2
-			uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Limit FIFO read to 1024 bytes
-			uint16_t packets = sensor_imu->fifo_read(
-				&sensor_imu_dev,
-				rawData,
-				1024
-			);  // TODO: name this better?
-#else
-			uint8_t* rawData = (uint8_t*)k_malloc(512);  // Limit FIFO read to 512 bytes
-			uint16_t packets = sensor_imu->fifo_read(
-				&sensor_imu_dev,
-				rawData,
-				512
-			);  // TODO: name this better?
-#endif
+			uint16_t packets = sensor_imu->fifo_read(&sensor_imu_dev, rawData, 1024);
 			LOG_DBG("IMU packet count: %u", packets);
 
 			// Read accelerometer
@@ -613,11 +603,12 @@ void main_imu_thread(void) {
 			{
 				switch (sensor_mode) {
 					case SENSOR_SENSOR_MODE_LOW_NOISE:
-						set_update_time_ms(6);
+						set_update_divider(1);
 						LOG_INF("Switching sensors to low noise");
 						break;
 					case SENSOR_SENSOR_MODE_LOW_POWER:
-						set_update_time_ms(33);
+						// TODO: Properly lower ODR or at least BDR for all sensors
+						set_update_divider(5);
 						LOG_INF("Switching sensors to low power 1");
 						if (mag_available && mag_enabled) {
 							sensor_mag->update_odr(
@@ -628,7 +619,8 @@ void main_imu_thread(void) {
 						}
 						break;
 					case SENSOR_SENSOR_MODE_LOW_POWER_2:
-						set_update_time_ms(100);
+						// TODO: Properly lower ODR or at least BDR for all sensors
+						set_update_divider(20);
 						LOG_INF("Switching sensors to low power 2");
 						if (mag_available && mag_enabled) {
 							sensor_mag->update_odr(
@@ -648,9 +640,8 @@ void main_imu_thread(void) {
 			max_gyro_speed_square = 0;
 			int processed_packets = 0;
 			float* gyroBias = sensor_calibration_get_gyroBias();
-			for (uint16_t i = 0; i < packets;
-				 i++)  // TODO: fifo_process_ext is available, need to implement it
-			{
+			for (uint16_t i = 0; i < packets; i++)
+			{ // TODO: fifo_process_ext is available, need to implement it
 				float raw_a[3] = {0};
 				float raw_g[3] = {0};
 				if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g))
@@ -707,10 +698,7 @@ void main_imu_thread(void) {
 
 				processed_packets++;
 			}
-			sensor_fusion->update_mag(m, sensor_update_time_ms / 1000.0); // TODO: use actual time?
-
-			// Free the FIFO buffer
-			k_free(rawData);
+			sensor_fusion->update_mag(m, 1.0 / fusion_update_rate); // TODO: use actual time?
 
 			// Copy average acceleration for this frame
 			if (a_count > 0)
@@ -876,16 +864,24 @@ void main_imu_thread(void) {
 			}
 		}
 		main_running = false;
-//		k_sleep(K_FOREVER);
-		int64_t time_delta = k_uptime_get() - time_begin;
+		uint64_t ticks_end = k_uptime_ticks();
+		if (ticks_end < ticks_begin)
+		{
+			ticks_begin &= 0x7FFFFFFF;
+			ticks_end |= 0x80000000;
+		}
+		int32_t time_delta_us = (int32_t)(ticks_end-ticks_begin)*1000000/CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
 		//		led_clock_offset += time_delta;
-		if (time_delta > sensor_update_time_ms) {
+		if (time_delta_us > fusion_update_time_us) {
 			k_yield();
 		} else {
-			k_msleep(sensor_update_time_ms - time_delta);
+			k_usleep(fusion_update_time_us - time_delta_us);
 		}
 		main_running = true;
 	}
+
+	// Free the FIFO buffer
+	k_free(rawData);
 }
 
 void wait_for_threads(void)  // TODO: add timeout
