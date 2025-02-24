@@ -4,6 +4,8 @@
 #include "sensor/sensor.h"
 
 // https://www.st.com/resource/en/datasheet/lsm6dso.pdf
+#define LSM6DSO_FIFO_CTRL1                 0x07
+#define LSM6DSO_FIFO_CTRL2                 0x08
 #define LSM6DSO_FIFO_CTRL3                 0x09
 #define LSM6DSO_FIFO_CTRL4                 0x0A
 
@@ -34,26 +36,95 @@
 #define DSO_FS_XL_16G 0x04 // 0bxxxx0100
 
 // Same for XL and G
-#define DSO_ODR_OFF     0b00000000
-#define DSO_ODR_12_5Hz  0b00010000
-#define DSO_ODR_26Hz    0b00100000
-#define DSO_ODR_52Hz    0b00110000
-#define DSO_ODR_104Hz   0b01000000
-#define DSO_ODR_208Hz   0b01010000
-#define DSO_ODR_416Hz   0b01100000
-#define DSO_ODR_833Hz   0b01110000
-#define DSO_ODR_1_66kHz 0b10000000
-#define DSO_ODR_3_33kHz 0b10010000
-#define DSO_ODR_6_66kHz 0b10100000
+#define DSO_ODR_OFF     0x00
+#define DSO_ODR_12_5Hz  0x01
+#define DSO_ODR_26Hz    0x02
+#define DSO_ODR_52Hz    0x03
+#define DSO_ODR_104Hz   0x04
+#define DSO_ODR_208Hz   0x05
+#define DSO_ODR_416Hz   0x06
+#define DSO_ODR_833Hz   0x07
+#define DSO_ODR_1_66kHz 0x08
+#define DSO_ODR_3_33kHz 0x09
+#define DSO_ODR_6_66kHz 0x0A
 
 #define DSO_OP_MODE_XL_HP    0x00 // High Performance
-#define DSO_OP_MODE_XL_NP    0x10 // Low Power
+#define DSO_OP_MODE_XL_LP    0x10 // Low Power
 
 #define DSO_OP_MODE_G_HP    0x00 // High Performance
-#define DSO_OP_MODE_G_NP    0x80 // Low Power
+#define DSO_OP_MODE_G_LP    0x80 // Low Power
 
 #define DSO_OP_MODE_G_AWAKE 0x00 // Gyro active
 #define DSO_OP_MODE_G_SLEEP 0x40 // Gyro sleep
+
+static const float DSO_ODR_GYRO_MAP[] = {
+	0,
+	12.5f,
+	26,
+	52,
+	104,
+	208,
+	417,
+	833,
+	1667,
+	3333,
+	6667,
+};
+static const float DSO_BDR_GYRO_MAP[] = {
+	0,
+	12.5f,
+	26,
+	52,
+	104,
+	208,
+	417,
+	833,
+	1667,
+	3333,
+	6667,
+	6.5f,
+};
+
+static const float DSO_ODR_ACCEL_MAP[] = {
+	0,
+	12.5f,
+	26,
+	52,
+	104,
+	208,
+	417,
+	833,
+	1667,
+	3333,
+	6667,
+	1.6f
+};
+static const float DSO_BDR_ACCEL_MAP[] = {
+	0,
+	12.5f,
+	26,
+	52,
+	104,
+	208,
+	417,
+	833,
+	1667,
+	3333,
+	6667,
+	1.6f
+};
+
+static const float DSO_BDR_EXT_MAP[] = {
+	0,
+	1.875f,
+	7.5f,
+	15,
+	30,
+	60,
+	120,
+	240,
+	480
+};
 
 int lsm6dso_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
 void lsm6dso_shutdown(const struct i2c_dt_spec *dev_i2c);

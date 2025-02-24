@@ -4,6 +4,8 @@
 #include "sensor/sensor.h"
 
 // https://www.st.com/resource/en/datasheet/lsm6dsv.pdf
+#define LSM6DSV_FIFO_CTRL1                 0x07
+#define LSM6DSV_FIFO_CTRL2                 0x08
 #define LSM6DSV_FIFO_CTRL3                 0x09
 #define LSM6DSV_FIFO_CTRL4                 0x0A
 
@@ -38,44 +40,114 @@
 #define LSM6DSV_SLV0_CONFIG                0x17
 
 // Same for XL and G
-#define ODR_OFF     0x00
-#define ODR_1_875Hz 0x01
-#define ODR_7_5Hz   0x02
-#define ODR_15Hz    0x03
-#define ODR_30Hz    0x04
-#define ODR_60Hz    0x05
-#define ODR_120Hz   0x06
-#define ODR_240Hz   0x07
-#define ODR_480Hz   0x08
-#define ODR_960Hz   0x09
-#define ODR_1_92kHz 0x0A
-#define ODR_3_84kHz 0x0B
-#define ODR_7_68kHz 0x0C
+#define DSV_ODR_OFF     0x00
+#define DSV_ODR_1_875Hz 0x01
+#define DSV_ODR_7_5Hz   0x02
+#define DSV_ODR_15Hz    0x03
+#define DSV_ODR_30Hz    0x04
+#define DSV_ODR_60Hz    0x05
+#define DSV_ODR_120Hz   0x06
+#define DSV_ODR_240Hz   0x07
+#define DSV_ODR_480Hz   0x08
+#define DSV_ODR_960Hz   0x09
+#define DSV_ODR_1_92kHz 0x0A
+#define DSV_ODR_3_84kHz 0x0B
+#define DSV_ODR_7_68kHz 0x0C
 
-#define OP_MODE_XL_HP     0x00 // High Performance
-#define OP_MODE_XL_HA     0x01 // High Accuracy
-#define OP_MODE_XL_ODR_T  0x03 // ODR-Triggered
-#define OP_MODE_XL_LP1    0x04 // Low Power mode 1 (2 mean)
-#define OP_MODE_XL_LP2    0x05 // Low Power mode 2 (4 mean)
-#define OP_MODE_XL_LP3    0x06 // Low Power mode 3 (8 mean)
-#define OP_MODE_XL_NORMAL 0x07
+#define DSV_OP_MODE_XL_HP     0x00 // High Performance
+#define DSV_OP_MODE_XL_HA     0x01 // High Accuracy
+#define DSV_OP_MODE_XL_ODR_T  0x03 // ODR-Triggered
+#define DSV_OP_MODE_XL_LP1    0x04 // Low Power mode 1 (2 mean)
+#define DSV_OP_MODE_XL_LP2    0x05 // Low Power mode 2 (4 mean)
+#define DSV_OP_MODE_XL_LP3    0x06 // Low Power mode 3 (8 mean)
+#define DSV_OP_MODE_XL_NORMAL 0x07
 
-#define OP_MODE_G_HP    0x00 // High Performance
-#define OP_MODE_G_HA    0x01 // High Accuracy
-#define OP_MODE_G_SLEEP 0x04
-#define OP_MODE_G_LP    0x05 // Low Power
+#define DSV_OP_MODE_G_HP    0x00 // High Performance
+#define DSV_OP_MODE_G_HA    0x01 // High Accuracy
+#define DSV_OP_MODE_G_SLEEP 0x04
+#define DSV_OP_MODE_G_LP    0x05 // Low Power
 
-#define FS_G_125DPS  0x00
-#define FS_G_250DPS  0x01
-#define FS_G_500DPS  0x02
-#define FS_G_1000DPS 0x03
-#define FS_G_2000DPS 0x04
-#define FS_G_4000DPS 0x0C
+#define DSV_FS_G_125DPS  0x00
+#define DSV_FS_G_250DPS  0x01
+#define DSV_FS_G_500DPS  0x02
+#define DSV_FS_G_1000DPS 0x03
+#define DSV_FS_G_2000DPS 0x04
+#define DSV_FS_G_4000DPS 0x0C
 
-#define FS_XL_2G  0x00
-#define FS_XL_4G  0x01
-#define FS_XL_8G  0x02
-#define FS_XL_16G 0x03
+#define DSV_FS_XL_2G  0x00
+#define DSV_FS_XL_4G  0x01
+#define DSV_FS_XL_8G  0x02
+#define DSV_FS_XL_16G 0x03
+
+static const float DSV_ODR_GYRO_MAP[] = {
+	0,
+	0,
+	7.5f,
+	15,
+	30,
+	60,
+	120,
+	240,
+	480,
+	960,
+	1920,
+	3840,
+	7680
+};
+static const float DSV_BDR_GYRO_MAP[] = {
+	0,
+	1.875f,
+	7.5f,
+	15,
+	30,
+	60,
+	120,
+	240,
+	480,
+	960,
+	1920,
+	3840,
+	7680
+};
+
+static const float DSV_ODR_ACCEL_MAP[] = {
+	0,
+	1.875f,
+	7.5f,
+	15,
+	30,
+	60,
+	120,
+	240,
+	480,
+	960,
+	1920,
+	3840,
+	7680
+};
+static const float DSV_BDR_ACCEL_MAP[] = {
+	0,
+	1.875f,
+	7.5f,
+	15,
+	30,
+	60,
+	120,
+	240,
+	480,
+	960,
+	1920,
+	3840,
+	7680
+};
+
+static const float DSV_BDR_EXT_MAP[] = {
+	0,
+	12.5f,
+	26,
+	52,
+	104
+};
 
 int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
 void lsm_shutdown(const struct i2c_dt_spec *dev_i2c);

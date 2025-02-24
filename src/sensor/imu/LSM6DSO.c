@@ -8,6 +8,9 @@
 
 #define PACKET_SIZE 7
 
+static const float accel_sensitivity = 16.0f / 32768.0f; // Always 16G (FS = ±16 g: 0.488 mg/LSB)
+static const float gyro_sensitivity = 0.070f; // Always 2000dps (FS = ±2000 dps: 70 mdps/LSB)
+
 static uint8_t last_accel_mode = 0xff;
 static uint8_t last_gyro_mode = 0xff;
 static uint8_t last_accel_odr = 0xff;
@@ -47,7 +50,6 @@ void lsm6dso_shutdown(const struct i2c_dt_spec *dev_i2c)
 
 int lsm6dso_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
-	int ODR;
 	uint8_t OP_MODE_XL;
 	uint8_t OP_MODE_G;
 	uint8_t ODR_XL;
@@ -55,151 +57,50 @@ int lsm6dso_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, floa
 	uint8_t GYRO_SLEEP = DSO_OP_MODE_G_AWAKE;
 
 	// Calculate accel
-	if (accel_time <= 0 || accel_time == INFINITY) // off, standby interpreted as off
-	{
-		// set High perf mode and off odr on XL
+	if (accel_time <= 0 || accel_time == INFINITY)
+	{ // off, standby interpreted as off
 		OP_MODE_XL = DSO_OP_MODE_XL_HP;
 		ODR_XL = DSO_ODR_OFF;
-		ODR = 0;
+		accel_time = 0;
 	}
 	else
-	{
-		// set High perf mode and select odr on XL
+	{ // set High perf mode and select odr on XL
 		OP_MODE_XL = DSO_OP_MODE_XL_HP;
-		ODR = 1 / accel_time;
-	}
-
-	if (ODR == 0)
-	{
-		accel_time = 0; // off
-		ODR_XL = DSO_ODR_OFF;
-	}
-	else if (accel_time < 0.3f / 1000) // in this case it seems better to compare accel_time
-	{
-		ODR_XL = DSO_ODR_6_66kHz; // TODO: this is absolutely awful
-		accel_time = 0.15 / 1000;
-	}
-	else if (accel_time < 0.6f / 1000)
-	{
-		ODR_XL = DSO_ODR_3_33kHz;
-		accel_time = 0.3 / 1000;
-	}
-	else if (accel_time < 1.2f / 1000)
-	{
-		ODR_XL = DSO_ODR_1_66kHz;
-		accel_time = 0.6 / 1000;
-	}
-	else if (accel_time < 2.4f / 1000)
-	{
-		ODR_XL = DSO_ODR_833Hz;
-		accel_time = 1.2 / 1000;
-	}
-	else if (accel_time < 4.8f / 1000)
-	{
-		ODR_XL = DSO_ODR_416Hz;
-		accel_time = 2.4 / 1000;
-	}
-	else if (accel_time < 9.6f / 1000)
-	{
-		ODR_XL = DSO_ODR_208Hz;
-		accel_time = 4.8 / 1000;
-	}
-	else if (accel_time < 19.2f / 1000)
-	{
-		ODR_XL = DSO_ODR_104Hz;
-		accel_time = 9.6 / 1000;
-	}
-	else if (accel_time < 38.4f / 1000)
-	{
-		ODR_XL = DSO_ODR_52Hz;
-		accel_time = 19.2 / 1000;
-	}
-	else if (ODR > 12.5)
-	{
-		ODR_XL = DSO_ODR_26Hz;
-		accel_time = 38.4 / 1000;
-	}
-	else
-	{
 		ODR_XL = DSO_ODR_12_5Hz;
-		accel_time = 1.0 / 12.5; // 13Hz -> 76.8 / 1000
+		float desiredODR = 1 / accel_time;
+		for (int i = 0; i < sizeof(DSO_ODR_ACCEL_MAP)/sizeof(float); i++)
+		{
+			if (desiredODR > DSO_ODR_ACCEL_MAP[i] && DSO_ODR_ACCEL_MAP[i] > DSO_ODR_ACCEL_MAP[ODR_XL])
+				ODR_XL = i;
+		}
+		accel_time = 1.0f / DSO_ODR_ACCEL_MAP[ODR_XL];
 	}
 
 	// Calculate gyro
-	if (gyro_time <= 0) // off
-	{
+	if (gyro_time <= 0)
+	{ // off
 		OP_MODE_G = DSO_OP_MODE_G_HP;
 		ODR_G = DSO_ODR_OFF;
-		ODR = 0;
+		gyro_time = 0;
 	}
-	else if (gyro_time == INFINITY) // sleep
-	{
-		OP_MODE_G = DSO_OP_MODE_G_NP;
+	else if (gyro_time == INFINITY)
+	{ // sleep
+		OP_MODE_G = DSO_OP_MODE_G_LP;
 		GYRO_SLEEP = DSO_OP_MODE_G_SLEEP;
 		ODR_G = last_gyro_odr; // using last ODR
-		ODR = 0;
+		gyro_time = 0; // off
 	}
 	else
 	{
 		OP_MODE_G = DSO_OP_MODE_G_HP;
-		ODR_G = 0; // the compiler complains unless I do this
-		ODR = 1 / gyro_time;
-	}
-
-	if (ODR == 0)
-	{
-		gyro_time = 0; // off
-		ODR_G = DSO_ODR_OFF;
-	}
-	else if (gyro_time < 0.3f / 1000) // in this case it seems better to compare gyro_time
-	{
-		ODR_G = DSO_ODR_6_66kHz; // TODO: this is absolutely awful
-		gyro_time = 1.0 / 6660;
-	}
-	else if (gyro_time < 0.6f / 1000)
-	{
-		ODR_G = DSO_ODR_3_33kHz;
-		gyro_time = 0.3 / 1000;
-	}
-	else if (gyro_time < 1.2f / 1000)
-	{
-		ODR_G = DSO_ODR_1_66kHz;
-		gyro_time = 0.6 / 1000;
-	}
-	else if (gyro_time < 2.4f / 1000)
-	{
-		ODR_G = DSO_ODR_833Hz;
-		gyro_time = 1.2 / 1000;
-	}
-	else if (gyro_time < 4.8f / 1000)
-	{
-		ODR_G = DSO_ODR_416Hz;
-		gyro_time = 2.4 / 1000;
-	}
-	else if (gyro_time < 9.6f / 1000)
-	{
-		ODR_G = DSO_ODR_208Hz;
-		gyro_time = 4.8 / 1000;
-	}
-	else if (gyro_time < 19.2f / 1000)
-	{
-		ODR_G = DSO_ODR_104Hz;
-		gyro_time = 9.6 / 1000;
-	}
-	else if (gyro_time < 38.4f / 1000)
-	{
-		ODR_G = DSO_ODR_52Hz;
-		gyro_time = 19.2 / 1000;
-	}
-	else if (ODR > 12.5)
-	{
-		ODR_G = DSO_ODR_26Hz;
-		gyro_time = 38.4 / 1000;
-	}
-	else
-	{
 		ODR_G = DSO_ODR_12_5Hz;
-		gyro_time = 1.0 / 12.5; // 13Hz -> 76.8 / 1000
+		float desiredODR = 1 / gyro_time;
+		for (int i = 0; i < sizeof(DSO_ODR_GYRO_MAP)/sizeof(float); i++)
+		{
+			if (desiredODR > DSO_ODR_GYRO_MAP[i] && DSO_ODR_GYRO_MAP[i] > DSO_ODR_GYRO_MAP[ODR_G])
+				ODR_G = i;
+		}
+		gyro_time = 1.0f / DSO_ODR_GYRO_MAP[ODR_G];
 	}
 
 	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) // if both were already configured
@@ -210,14 +111,14 @@ int lsm6dso_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, floa
 	last_accel_odr = ODR_XL;
 	last_gyro_odr = ODR_G;
 
-	int err = i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL1, ODR_XL | DSO_FS_XL_16G); // set accel ODR and FS
+	int err = i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL1, (ODR_XL << 4) | DSO_FS_XL_16G); // set accel ODR and FS
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL6, OP_MODE_XL); // set accelerator perf mode
 
-	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL2, ODR_G | DSO_FS_G_2000DPS); // set gyro ODR and mode
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL2, (ODR_G << 4) | DSO_FS_G_2000DPS); // set gyro ODR and mode
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL7, OP_MODE_G); // set gyroscope perf mode
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL4, GYRO_SLEEP); // set gyroscope awake/sleep mode
 
-	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_FIFO_CTRL3, (ODR_XL >> 4) | ODR_G); // set accel and gyro batch rate
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_FIFO_CTRL3, ODR_XL << 0 | ODR_G << 4); // set same BDR
 	if (err)
 		LOG_ERR("I2C error");
 
@@ -253,11 +154,11 @@ uint16_t lsm6dso_fifo_read(const struct i2c_dt_spec *dev_i2c, uint8_t *data, uin
 
 void lsm6dso_setup_WOM(const struct i2c_dt_spec *dev_i2c)
 { // TODO: should be off by the time WOM will be setup
-//	i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL1, ODR_OFF); // set accel off
-//	i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL2, ODR_OFF); // set gyro off
+//	i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL1, (DSO_ODR_OFF << 4)); // set accel off
+//	i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL2, (DSO_ODR_OFF << 4)); // set gyro off
 
-	int err = i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL1, DSO_ODR_208Hz | DSO_FS_XL_8G); // set accel ODR and FS
-	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL6, DSO_OP_MODE_XL_NP | 0x08); // set accel perf mode, set offset weight to 2^-6 g/LSB
+	int err = i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL1, (DSO_ODR_208Hz << 4) | DSO_FS_XL_8G); // set accel ODR and FS
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL6, DSO_OP_MODE_XL_LP | 0x08); // set accel perf mode, set offset weight to 2^-6 g/LSB
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL5, 0x80); // enable accel ULP // TODO: for LSM6DSR/ISM330DHCX this bit may be required to be 0
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_TAP_CFG0, 0x10); // set SLOPE_FDS (using user offset for wake-up)
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_WAKE_UP_THS, 0x40 | 0x01); // use offset correction for wake-up, set threshold, 1 * 31.25 mg is ~31.25 mg
