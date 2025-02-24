@@ -233,7 +233,7 @@ static void mmc_RESET(const struct i2c_dt_spec *dev_i2c)
 	k_busy_wait(1); // self clearing after 500 ns
 }
 
-const sensor_mag_t sensor_mag_mmc5983ma = {
+extern const sensor_mag_t sensor_mag_mmc5983ma = {
 	*mmc_init,
 	*mmc_shutdown,
 

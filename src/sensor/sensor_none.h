@@ -56,8 +56,6 @@ int imu_none_fifo_process_ext(uint16_t index, uint8_t *data, float a[3], float g
 void imu_none_ext_read(const struct i2c_dt_spec *dev_i2c, uint8_t *raw_m);
 int imu_none_ext_passthrough(const struct i2c_dt_spec *dev_i2c, bool passthrough);
 
-extern const sensor_imu_t sensor_imu_none;
-
 int mag_none_init(const struct i2c_dt_spec* dev_i2c, float time, float* actual_time);
 void mag_none_shutdown(const struct i2c_dt_spec* dev_i2c);
 
@@ -72,7 +70,5 @@ void mag_none_mag_read(const struct i2c_dt_spec* dev_i2c, float m[3]);
 float mag_none_temp_read(const struct i2c_dt_spec* dev_i2c, float bias[3]);
 
 void mag_none_mag_process(uint8_t* raw_m, float m[3]);
-
-extern const sensor_mag_t sensor_mag_none;
 
 #endif

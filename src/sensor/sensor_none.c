@@ -110,7 +110,7 @@ int imu_none_ext_passthrough(const struct i2c_dt_spec* dev_i2c, bool passthrough
 	return -1;
 }
 
-const sensor_imu_t sensor_imu_none
+extern const sensor_imu_t sensor_imu_none
 	= {*imu_none_init,
 	   *imu_none_shutdown,
 
@@ -186,7 +186,7 @@ void mag_none_mag_process(uint8_t* raw_m, float m[3]) {
 	return;
 }
 
-const sensor_mag_t sensor_mag_none
+extern const sensor_mag_t sensor_mag_none
 	= {*mag_none_init,
 	   *mag_none_shutdown,
 

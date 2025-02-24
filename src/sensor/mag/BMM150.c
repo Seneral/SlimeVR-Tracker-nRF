@@ -299,7 +299,7 @@ static float compensate_z(int16_t mag_data_z, uint16_t data_rhall)
     return retval;
 }
 
-const sensor_mag_t sensor_mag_bmm150 = {
+extern const sensor_mag_t sensor_mag_bmm150 = {
 	*bmm1_init,
 	*bmm1_shutdown,
 

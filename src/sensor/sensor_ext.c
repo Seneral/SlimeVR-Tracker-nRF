@@ -23,8 +23,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/i2c.h>
 
-#include "sensor_none.h"
 #include "sensor_ext.h"
+#include "sensors_enum.h"
 
 static const sensor_imu_t* ext_imu = &sensor_imu_none;
 static const sensor_mag_t* ext_mag = &sensor_mag_none;
@@ -84,7 +84,7 @@ float mag_ext_temp_read(const struct i2c_dt_spec* dev_i2c, float bias[3]) {
 
 void mag_ext_mag_process(uint8_t* raw_m, float m[3]) { ext_mag->mag_process(raw_m, m); }
 
-const sensor_mag_t sensor_mag_ext
+extern const sensor_mag_t sensor_mag_ext
 	= {*mag_ext_init,
 	   *mag_ext_shutdown,
 

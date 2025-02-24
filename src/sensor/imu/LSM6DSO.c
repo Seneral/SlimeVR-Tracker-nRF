@@ -200,7 +200,7 @@ int lsm6dso_ext_setup(uint8_t addr, uint8_t reg)
 	}
 }
 
-const sensor_imu_t sensor_imu_lsm6dso = {
+extern const sensor_imu_t sensor_imu_lsm6dso = {
 	*lsm6dso_init,
 	*lsm6dso_shutdown,
 

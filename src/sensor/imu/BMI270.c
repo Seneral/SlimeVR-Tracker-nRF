@@ -402,7 +402,7 @@ static int factor_zx_read(const struct i2c_dt_spec *dev_i2c)
 	return factor_zx;
 }
 
-const sensor_imu_t sensor_imu_bmi270 = {
+extern const sensor_imu_t sensor_imu_bmi270 = {
 	*bmi_init,
 	*bmi_shutdown,
 

@@ -396,7 +396,7 @@ void icm_setup_WOM(const struct i2c_dt_spec *dev_i2c)
 		LOG_ERR("I2C error");
 }
 
-const sensor_imu_t sensor_imu_icm42688 = {
+extern const sensor_imu_t sensor_imu_icm42688 = {
 	*icm_init,
 	*icm_shutdown,
 

@@ -193,7 +193,7 @@ void lis3_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_lis3mdl = {
+extern const sensor_mag_t sensor_mag_lis3mdl = {
 	*lis3_init,
 	*lis3_shutdown,
 

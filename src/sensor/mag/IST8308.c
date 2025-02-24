@@ -153,7 +153,7 @@ void ist8308_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_ist8308 = {
+extern const sensor_mag_t sensor_mag_ist8308 = {
 	*ist8308_init,
 	*ist8308_shutdown,
 

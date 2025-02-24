@@ -25,24 +25,6 @@
 
 #include <zephyr/kernel.h>
 
-#include "sensor_none.h"
-#include "sensor_ext.h"
-
-#include "imu/BMI270.h"
-#include "imu/ICM42688.h"
-#include "imu/ICM45686.h"
-#include "imu/LSM6DSV.h"
-#include "imu/LSM6DSO.h"
-
-#include "mag/AK09940.h"
-#include "mag/BMM150.h"
-#include "mag/BMM350.h"
-#include "mag/IST8306.h"
-#include "mag/IST8308.h"
-#include "mag/LIS2MDL.h"
-#include "mag/LIS3MDL.h"
-#include "mag/MMC5983MA.h"
-
 #include "scan.h"
 #include "sensor.h"
 #include "sensors_enum.h"

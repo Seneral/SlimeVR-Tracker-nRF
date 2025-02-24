@@ -302,7 +302,7 @@ int lsm_ext_init(const struct i2c_dt_spec *dev_i2c, uint8_t ext_addr, uint8_t ex
 	return err;
 }
 
-const sensor_imu_t sensor_imu_lsm6dsv = {
+extern const sensor_imu_t sensor_imu_lsm6dsv = {
 	*lsm_init,
 	*lsm_shutdown,
 

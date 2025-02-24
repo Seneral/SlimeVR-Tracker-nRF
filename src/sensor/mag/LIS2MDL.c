@@ -142,7 +142,7 @@ void lis2_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_lis2mdl = {
+extern const sensor_mag_t sensor_mag_lis2mdl = {
 	*lis2_init,
 	*lis2_shutdown,
 

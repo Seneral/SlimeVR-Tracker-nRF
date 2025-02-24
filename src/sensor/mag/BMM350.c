@@ -224,7 +224,7 @@ void bmm3_mag_process(uint8_t *raw_m, float m[3])
 
 // TODO: from BMM350_SensorAPI, add otp_dump_after_boot and update_mag_off_sens
 
-const sensor_mag_t sensor_mag_bmm350 = {
+extern const sensor_mag_t sensor_mag_bmm350 = {
 	*bmm3_init,
 	*bmm3_shutdown,
 

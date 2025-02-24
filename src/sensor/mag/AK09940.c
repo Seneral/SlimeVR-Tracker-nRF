@@ -147,7 +147,7 @@ void ak_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_ak09940 = {
+extern const sensor_mag_t sensor_mag_ak09940 = {
 	*ak_init,
 	*ak_shutdown,
 

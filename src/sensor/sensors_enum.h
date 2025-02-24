@@ -105,6 +105,28 @@ memsic
 20,39,2F (06:MMC34160PJ;10:MMC5603NJ/MMC5633NJL,11:MMC5616WA;0A:MMC3630KJ,30:MMC5983MA)
 */
 
+#include "sensor.h"
+
+// IMU Drivers
+extern const sensor_imu_t sensor_imu_bmi270;
+extern const sensor_imu_t sensor_imu_icm42688;
+extern const sensor_imu_t sensor_imu_icm45686;
+extern const sensor_imu_t sensor_imu_lsm6dsv;
+extern const sensor_imu_t sensor_imu_lsm6dso;
+extern const sensor_imu_t sensor_imu_none;
+
+// MAG Drivers
+extern const sensor_mag_t sensor_mag_ak09940;
+extern const sensor_mag_t sensor_mag_bmm150;
+extern const sensor_mag_t sensor_mag_bmm350;
+extern const sensor_mag_t sensor_mag_ist8306;
+extern const sensor_mag_t sensor_mag_ist8308;
+extern const sensor_mag_t sensor_mag_lis2mdl;
+extern const sensor_mag_t sensor_mag_lis3mdl;
+extern const sensor_mag_t sensor_mag_mmc5983ma;
+extern const sensor_mag_t sensor_mag_ext;
+extern const sensor_mag_t sensor_mag_none;
+
 enum dev_imu {
 	IMU_BMI160,
 	IMU_BMI270,
