@@ -24,7 +24,44 @@ static uint8_t last_accel_bdr = 0xff;
 static uint8_t last_gyro_bdr = 0xff;
 static uint8_t last_ext_bdr = 0xff;
 
+static float maximum_bdr = 0xff;
+static uint32_t time_slot_us;
+static float time_slot_us_flt;
+static float timestamp_to_us;
+static uint64_t overflow_us;
+static uint64_t base_time_us;
+static bool need_time_scale_update;
+
+static uint64_t cur_time_us = 0;
+static float cur_time_us_flt = 0;
+static int cur_time_slot = 0;
+
 LOG_MODULE_REGISTER(LSM6DSO, LOG_LEVEL_DBG);
+
+static uint64_t map_timestamp_to_us(uint32_t timestamp)
+{
+	uint64_t remapped_us;
+	uint32_t hi = timestamp>>16, lo = timestamp&0xFFFF;
+	remapped_us = (uint64_t)((float)hi * timestamp_to_us);
+	remapped_us <<= 16;
+	remapped_us = (uint64_t)((float)lo * timestamp_to_us);
+	return remapped_us + base_time_us;
+}
+
+static int update_time_scale(const struct i2c_dt_spec *dev_i2c)
+{
+	// TODO: Does changing bdr actually change time slot scale?
+	// Seems kinda messed up if timestamp itself stays the same but suddenly means something completely different
+	maximum_bdr = MAX(DSO_ODR_GYRO_MAP[last_gyro_bdr], DSO_ODR_ACCEL_MAP[last_accel_bdr]);
+	time_slot_us = (uint32_t)(1000000/maximum_bdr); // Only loose neglibible precision here	
+	time_slot_us_flt = 1000000.0f/maximum_bdr;
+	uint8_t freq_fine;
+	int err = i2c_reg_read_byte_dt(dev_i2c, LSM6DSO_INTERNAL_FREQ_FINE, &freq_fine);
+	timestamp_to_us = 25.0f/(1 + 0.0015f * (float)freq_fine);
+	LOG_INF("Read FREQ_FINE as %d resulting in timestamp_to_us of %f", freq_fine, timestamp_to_us);
+	overflow_us = map_timestamp_to_us(0xFFFFFFFF);
+	return err;
+}
 
 int lsm6dso_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
@@ -38,12 +75,20 @@ int lsm6dso_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float acce
 	// Set initial BDR, any later changes should be detected via FIFO packets
 	last_accel_bdr = last_accel_odr;
 	last_gyro_bdr = last_gyro_odr;
+	// Init timesync
+	base_time_us = 0;
+	cur_time_us = 0;
+	cur_time_us_flt = 0;
+	cur_time_slot = 0;
+	err |= update_time_scale(dev_i2c);
 	// Enable Continuous mode, with lowest ODR for timestamp and temperature
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_FIFO_CTRL4, 0xC0 | 0x10 | 0x06);
-	if (err)
-		LOG_ERR("I2C error");
+	// Enable timestamp (else timestamp packets will be 0)
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSO_CTRL10, 0x20);
 	if (use_ext_fifo)
 		err |= lsm_ext_init(dev_i2c, ext_addr, ext_reg);
+	if (err)
+		LOG_ERR("I2C error");
 	return (err < 0 ? err : 0);
 }
 
@@ -162,7 +207,19 @@ uint16_t lsm6dso_fifo_read(const struct i2c_dt_spec *dev_i2c, uint8_t *data, uin
 
 static inline bool lsm_parse_fifo_packet(sensor_packet_t *packet, uint8_t data[PACKET_SIZE])
 {
-	packet->timestampUS = 0; // Not implemented
+	if (true)
+	{ // TODO: Configure timestamps?
+		// Track advances in timestamp via a 3-bit timeslot in packets
+		int time_slot = (data[0] >> 1) & 0x3;
+		int diff_slots = time_slot-cur_time_slot;
+		if (diff_slots < -1) diff_slots += 4;
+		cur_time_slot = time_slot;
+		// Update timestamp with advance in timeslot
+		cur_time_us += diff_slots*time_slot_us;
+		cur_time_us_flt += (float)diff_slots*time_slot_us_flt;
+		//LOG_INF("Updated timeslots by %d and timestamp to %f!", diff_slots, cur_time_us);
+		packet->timestampUS = cur_time_us;
+	}
 
 	int sensorTag = data[0] >> 3;
 	switch (sensorTag)
@@ -190,7 +247,20 @@ static inline bool lsm_parse_fifo_packet(sensor_packet_t *packet, uint8_t data[P
 			return true;
 		case 0x04:
 		{
-			// TODO: Implement timestamps
+			// Synchronise timestamp
+			uint32_t timestamp = data[1] | (((uint32_t)data[2]) << 8)
+				| (((uint32_t)data[3]) << 16) | (((uint32_t)data[4]) << 24);
+			uint64_t timestamp_us = map_timestamp_to_us(timestamp);
+			while (timestamp_us+overflow_us/2 < cur_time_us)
+			{
+				base_time_us += overflow_us;
+				timestamp_us += overflow_us;
+				cur_time_us_flt += overflow_us;
+			}
+			uint64_t diff = timestamp_us < cur_time_us? cur_time_us-timestamp_us : timestamp_us-cur_time_us;
+			if (diff > 30) LOG_WRN("Updating timestamp from %lldus / %fus to %lldus!", cur_time_us, cur_time_us_flt, timestamp_us);
+			cur_time_us = timestamp_us;
+			cur_time_us_flt = timestamp_us;
 			// Check if BDRs changed
 			uint8_t ext_bdr = data[5] & 0x0F, accel_bdr = data[6] & 0x0F, gyro_bdr = (data[6] >> 4) & 0x0F;
 			if (gyro_bdr != last_gyro_bdr || accel_bdr != last_accel_bdr || ext_bdr != last_ext_bdr)
@@ -200,7 +270,8 @@ static inline bool lsm_parse_fifo_packet(sensor_packet_t *packet, uint8_t data[P
 				last_gyro_bdr = gyro_bdr;
 				last_accel_bdr = accel_bdr;
 				last_ext_bdr = ext_bdr;
-			packet->tag = SENSOR_UPDATE;
+				need_time_scale_update = true;
+				packet->tag = SENSOR_UPDATE;
 				packet->data.BDRupdate[0] = DSO_BDR_GYRO_MAP[last_gyro_bdr];
 				packet->data.BDRupdate[1] = DSO_BDR_ACCEL_MAP[last_accel_bdr];
 				packet->data.BDRupdate[2] = DSO_BDR_EXT_MAP[last_ext_bdr];
@@ -227,6 +298,12 @@ static inline bool lsm_parse_fifo_packet(sensor_packet_t *packet, uint8_t data[P
 
 int lsm6dso_fetch_sensor_packets(const struct i2c_dt_spec *dev_i2c, int max_count, handle_sensor_packet_t cb, void *userdata)
 {
+	if (need_time_scale_update)
+	{
+		need_time_scale_update = false;
+		err |= update_time_scale(dev_i2c);
+	}
+
 	int err = 0;
 	uint16_t total = 0;
 	uint16_t count = UINT16_MAX;

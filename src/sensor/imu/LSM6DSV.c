@@ -23,7 +23,28 @@ static uint8_t last_accel_bdr = 0xff;
 static uint8_t last_gyro_bdr = 0xff;
 static uint8_t last_ext_bdr = 0xff;
 
+static float maximum_bdr = 0xff;
+static uint32_t time_slot_us;
+static uint32_t timestamp_to_us;
+static uint64_t overflow_us;
+
+static uint64_t cur_time_us = 0;
+static uint8_t cur_time_slot = 0;
+
 LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
+
+static void update_time_scale()
+{
+	// TODO: Does changing bdr actually change time slot scale?
+	// Seems kinda messed up if timestamp itself stays the same but suddenly means something completely different
+	maximum_bdr = MAX(DSV_ODR_GYRO_MAP[last_gyro_bdr], DSV_ODR_ACCEL_MAP[last_accel_bdr]);
+	time_slot_us = (uint32_t)(1000000/maximum_bdr); // Only loose neglibible precision here
+	// TODO: Timestamp scale is slightly off, but can be modelled as drift
+	timestamp_to_us = 25;
+	//timestamp_to_us = 25.0f/(1 + 0.0015f * FREQ_FINE);
+	// IF we fetch FREQ_FINE, consider we might be in fifo fetch and doing I2C here might mess up address wraparound
+	overflow_us = (uint64_t)0xFFFFFFFF * timestamp_to_us;
+}
 
 int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
@@ -37,8 +58,11 @@ int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_ti
 	// Set initial BDR, any later changes should be detected via FIFO packets
 	last_accel_bdr = last_accel_odr;
 	last_gyro_bdr = last_gyro_odr;
+	update_time_scale();
 	// Enable Continuous mode, with lowest ODR for timestamp and temperature
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FIFO_CTRL4, 0xC0 | 0x10 | 0x06);
+	// Enable timestamp (else timestamp packets will be 0)
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FUNCTIONS_ENABLE, 0x40);
 	if (err)
 		LOG_ERR("I2C error");
 	if (use_ext_fifo)
@@ -221,7 +245,18 @@ float lsm_temp_read(const struct i2c_dt_spec *dev_i2c)
 
 static inline bool lsm6dsv_parse_fifo_packet(sensor_packet_t *packet, uint8_t data[PACKET_SIZE])
 {
-	packet->timestampUS = 0; // Not implemented
+	if (true)
+	{ // TODO: Configure timestamps?
+		// Track advances in timestamp via a 3-bit timeslot in packets
+		int timeSlot = (data[0] >> 1) & 0x3;
+		int diffTimeSlots = timeSlot-cur_time_slot;
+		if (diffTimeSlots < 0) diffTimeSlots += 4;
+		cur_time_slot = timeSlot;
+		// Update timestamp with advance in timeslot
+		cur_time_us += diffTimeSlots*time_slot_us;
+		//LOG_INF("Updated timeslots by %d and timestamp to %f!", diffTimeSlots, cur_time_us);
+		packet->timestampUS = cur_time_us;
+	}
 
 	int sensorTag = data[0] >> 3;
 	switch (sensorTag)
@@ -249,7 +284,15 @@ static inline bool lsm6dsv_parse_fifo_packet(sensor_packet_t *packet, uint8_t da
 			return true;
 		case 0x04:
 		{
-			// TODO: Implement timestamps
+			// Synchronise timestamp
+			uint32_t timestamp = data[1] | (((uint32_t)data[2]) << 8)
+				| (((uint32_t)data[3]) << 16) | (((uint32_t)data[4]) << 24);
+			uint64_t timestamp_us = (uint64_t)timestamp*timestamp_to_us;
+			long diff = (long)cur_time_us-timestamp_us;
+			// TODO: Handle overflows at overflow_us
+			if (abs((int)diff) > 30)
+				LOG_WRN("Updating timestamp from %lldus to %lldus!", cur_time_us, timestamp_us);
+			cur_time_us = timestamp_us;
 			// Check if BDRs changed
 			uint8_t ext_bdr = data[5] & 0x0F, accel_bdr = data[6] & 0x0F, gyro_bdr = (data[6] >> 4) & 0x0F;
 			if (gyro_bdr != last_gyro_bdr || accel_bdr != last_accel_bdr || ext_bdr != last_ext_bdr)
@@ -259,6 +302,7 @@ static inline bool lsm6dsv_parse_fifo_packet(sensor_packet_t *packet, uint8_t da
 				last_gyro_bdr = gyro_bdr;
 				last_accel_bdr = accel_bdr;
 				last_ext_bdr = ext_bdr;
+				update_time_scale();
 				packet->tag = SENSOR_UPDATE;
 				packet->data.BDRupdate[0] = DSV_BDR_GYRO_MAP[last_gyro_bdr];
 				packet->data.BDRupdate[1] = DSV_BDR_ACCEL_MAP[last_accel_bdr];
@@ -342,7 +386,7 @@ void lsm_setup_WOM(const struct i2c_dt_spec *dev_i2c)
 	}
 	err |= i2c_burst_write_dt(dev_i2c, LSM6DSV_X_OFS_USR, offset, 3); // set offset correction
 
-	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FUNCTIONS_ENABLE, 0x80); // enable interrupts
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FUNCTIONS_ENABLE, 0x80 | 0x40); // enable interrupts and timestamp
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_MD1_CFG, 0x20); // route wake-up to INT1
 	if (err)
 		LOG_ERR("I2C error");

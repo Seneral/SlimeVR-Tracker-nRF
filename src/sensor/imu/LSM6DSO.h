@@ -17,6 +17,8 @@
 #define LSM6DSO_CTRL6                      0x15
 #define LSM6DSO_CTRL7                      0x16
 #define LSM6DSO_CTRL8                      0x17
+#define LSM6DSO_CTRL9                      0x18
+#define LSM6DSO_CTRL10                     0x19
 
 #define LSM6DSO_FIFO_STATUS1               0x3A
 
@@ -25,6 +27,8 @@
 #define LSM6DSO_WAKE_UP_THS                0x5B
 #define LSM6DSO_WAKE_UP_DUR                0x5C
 #define LSM6DSO_MD1_CFG                    0x5E
+
+#define LSM6DSO_INTERNAL_FREQ_FINE         0x63
 
 #define LSM6DSO_X_OFS_USR                  0x73
 
