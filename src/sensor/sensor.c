@@ -33,6 +33,8 @@
 
 #include "sensor.h"
 
+#include "time_sync.h"
+
 #if DT_NODE_EXISTS(DT_NODELABEL(imu))
 #define SENSOR_IMU_EXISTS true
 #define SENSOR_IMU_NODE DT_NODELABEL(imu)
@@ -70,6 +72,9 @@ static float gyro_actual_time;
 static float mag_actual_time;
 
 static float timestep_us; // Time in us represented by one time slot (may be sensor and ODR specifc)
+static uint32_t latest_timestep = 0;
+static uint64_t latest_timestamp = 0;
+static time_sync_t timesync;
 
 static bool sensor_fusion_init;
 static bool sensor_sensor_init;
@@ -507,6 +512,17 @@ int main_imu_init(void) {
 	LOG_INF("Using %s", fusion_names[fusion_id]);
 	LOG_INF("Initialized fusion");
 	sensor_fusion_init = true;
+
+	// Setup time sync
+	init_time_sync(&timesync);
+	timesync.factor = timestep_us;
+#ifdef SENSOR_IMU_EXISTS
+	// Estimate constant latency from I2C communication speed of requesting fifo size
+	const uint32_t i2c_clock = DT_PROP(DT_PARENT(DT_NODELABEL(imu)), clock_frequency);
+	const uint32_t request_delay_us = 20 * 1000000/i2c_clock; // About 20 bits sent before IMU sends fifo size back
+	timesync.const_offset_us = -(int)request_delay_us;
+#endif
+
 	return 0;
 }
 
@@ -526,15 +542,15 @@ static bool send_info = false;
 
 static int packet_errors = 0;
 
-static float lastGyro[3], lastAccel[3], lastMag[3];
+static uint32_t latest_timestep_gyro = 0, latest_timestep_accel = 0, latest_timestep_mag = 0;
+static float latest_gyro[3], latest_accel[3], latest_mag[3];
 
 static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 {
-	// TODO: Implement specific delta time for each fusion update once they make use of it
-	//int ds = packet.time_slot - lastSlotOfSensor;
-	//float dt = (float)ds*timestep_us;
-	float dt = timestep_us;
-
+	if (packet.timestep < latest_timestep)
+		LOG_WRN("Bad timestep %d < %d", packet.timestep, latest_timestep);
+	else
+		latest_timestep = packet.timestep;
 	switch (packet.tag)
 	{
 		case SENSOR_UPDATE:
@@ -554,9 +570,12 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			float gy = packet.data.gyro[1] - gyroBias[1];  // gres
 			float gz = packet.data.gyro[2] - gyroBias[2];  // gres
 			float g[] = {SENSOR_GYROSCOPE_AXES_ALIGNMENT};
+
+			float dt = (float)(packet.timestep - latest_timestep_gyro)*timestep_us;
 			sensor_fusion->update_gyro(g, dt);
 
-			memcpy(lastGyro, g, sizeof(g));
+			latest_timestep_gyro = packet.timestep;
+			memcpy(latest_gyro, g, sizeof(g));
 
 			if (mag_available && mag_enabled)
 			{
@@ -590,9 +609,12 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			float az = packet.data.accel[2] - accelBias[2];
 		#endif
 			float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
+
+			float dt = (float)(packet.timestep - latest_timestep_accel)*timestep_us;
 			sensor_fusion->update_accel(a, dt);
 
-			memcpy(lastAccel, a, sizeof(a));
+			latest_timestep_accel = packet.timestep;
+			memcpy(latest_accel, a, sizeof(a));
 			break;
 		}
 		case SENSOR_TEMP:
@@ -606,18 +628,21 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 //			for (int i = 0; i < 3; i++) {
 //				packet.data.mag[i] -= magBias[i];
 //			}
-			sensor_sample_mag(lastAccel, packet.data.mag);  // 400us
+			sensor_sample_mag(latest_accel, packet.data.mag);  // 400us
 			apply_BAinv(packet.data.mag, sensor_calibration_get_magBAinv());
 			float mx = packet.data.mag[0];
 			float my = packet.data.mag[1];
 			float mz = packet.data.mag[2];
 			float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
+
+			float dt = (float)(packet.timestep - latest_timestep_mag)*timestep_us;
 			sensor_fusion->update_mag(m, dt);
 
-			memcpy(lastMag, m, sizeof(m));
+			latest_timestep_mag = packet.timestep;
+			memcpy(latest_mag, m, sizeof(m));
 
 			// Update fusion gyro sanity?
-			sensor_fusion->update_gyro_sanity(lastGyro, lastMag);
+			sensor_fusion->update_gyro_sanity(latest_gyro, latest_mag);
 			break;
 		}
 		case SENSOR_EXT:
@@ -657,6 +682,7 @@ void main_imu_thread(void) {
 
 			// Fetch all packets currently in FIFO
 			max_gyro_speed_square = 0;
+			uint64_t timestamp_read = k_uptime_ticks();
 			int processed_packets = sensor_imu->fetch_sensor_packets(&sensor_imu_dev, 1000, parse_sensor_packet, NULL);
 			if (processed_packets > 0)
 			{
@@ -683,7 +709,7 @@ void main_imu_thread(void) {
 				sensor_packet_t packet;
 				packet.tag = SENSOR_MAG;
 				sensor_mag->mag_read(&sensor_mag_dev, packet.data.mag);
-				packet.timestep = 0;
+				packet.timestep = latest_timestep; // Best approximation for time
 				parse_sensor_packet(NULL, packet);
 			}
 
@@ -721,6 +747,18 @@ void main_imu_thread(void) {
 				};
 			}
 
+			// Update synchronised time
+			// Timestamp of reading fifo size is the best estimate of timestamp of last packet in fifo
+			latest_timestamp = timestamp_read;
+			uint64_t cur_timestamp_us = k_ticks_to_us_floor64(latest_timestamp); // Uses z_tmcvt_gen_64_fast in default config
+			//uint32_t cur_timestamp_us = k_ticks_to_us_floor32(latest_timestamp); // Could also use, but overflows in an hour
+			// latest_timestep overflows in 60days using timestep interval of 800Hz
+			uint64_t synced_time_us = update_time_synced(&timesync, latest_timestep, cur_timestamp_us);
+			// This is the best guess of the time the last fifo sensor was read, mapped to this nRFs uptime in us
+			// This can then be used to further propagate that synced time to the receiver, then the host OS
+			//LOG_INF("Timestep %d with measurement %lldus mapped to %lldus - factor %.3f",
+			//	latest_timestep, cur_timestamp_us, synced_time_us, timesync.factor);
+
 			// Get updated quaternion from fusion
 			sensor_fusion->get_quat(q);
 			q_normalize(q, q);  // safe to use self as output
@@ -732,7 +770,7 @@ void main_imu_thread(void) {
 			vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
 			vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
 			for (int i = 0; i < 3; i++)
-				lin_a[i] = (lastAccel[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
+				lin_a[i] = (latest_accel[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
 
 			// Check the IMU gyroscope
 			if (sensor_fusion->get_gyro_sanity() == 0
@@ -856,12 +894,8 @@ void main_imu_thread(void) {
 		}
 		main_running = false;
 		uint64_t ticks_end = k_uptime_ticks();
-		if (ticks_end < ticks_begin)
-		{
-			ticks_begin &= 0x7FFFFFFF;
-			ticks_end |= 0x80000000;
-		}
-		int32_t time_delta_us = (int32_t)(ticks_end-ticks_begin)*1000000/CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+		// 64bit ticks just don't overflow, so all good here
+		uint32_t time_delta_us = (uint32_t)(ticks_end-ticks_begin)*1000000/CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
 		//		led_clock_offset += time_delta;
 		if (time_delta_us > fusion_update_time_us) {
 			k_yield();
