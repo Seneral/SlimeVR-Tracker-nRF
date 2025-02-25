@@ -17,6 +17,8 @@
 #define LSM6DSO_CTRL6                      0x15
 #define LSM6DSO_CTRL7                      0x16
 #define LSM6DSO_CTRL8                      0x17
+#define LSM6DSO_CTRL9                      0x18
+#define LSM6DSO_CTRL10                     0x19
 
 #define LSM6DSO_FIFO_STATUS1               0x3A
 
@@ -126,12 +128,14 @@ static const float DSO_BDR_EXT_MAP[] = {
 	480
 };
 
-int lsm6dso_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int lsm6dso_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time, float *timestep_us);
 void lsm6dso_shutdown(const struct i2c_dt_spec *dev_i2c);
 
 int lsm6dso_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
 
 uint16_t lsm6dso_fifo_read(const struct i2c_dt_spec *dev_i2c, uint8_t *data, uint16_t len);
+
+int lsm6dso_fetch_sensor_packets(const struct i2c_dt_spec *dev_i2c, int max_count, handle_sensor_packet_t cb, void *userdata);
 
 void lsm6dso_setup_WOM(const struct i2c_dt_spec *dev_i2c);
 

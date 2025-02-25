@@ -31,7 +31,8 @@ int imu_none_init(
 	float accel_time,
 	float gyro_time,
 	float* accel_actual_time,
-	float* gyro_actual_time
+	float* gyro_actual_time,
+	float* timestep_us
 );
 void imu_none_shutdown(const struct i2c_dt_spec* dev_i2c);
 

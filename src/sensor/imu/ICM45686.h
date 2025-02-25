@@ -135,7 +135,7 @@ writing to the register pointed by the post-auto-incremented address.
 #define GYRO_ODR_3_125Hz  0x0E
 #define GYRO_ODR_1_5625Hz 0x0F
 
-int icm45_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int icm45_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time, float *timestep_us);
 void icm45_shutdown(const struct i2c_dt_spec *dev_i2c);
 
 int icm45_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);

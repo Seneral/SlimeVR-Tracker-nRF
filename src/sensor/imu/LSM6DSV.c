@@ -19,29 +19,54 @@ static uint8_t ext_addr = 0xff;
 static uint8_t ext_reg = 0xff;
 static bool use_ext_fifo = false;
 
+static uint8_t last_accel_bdr = 0xff;
+static uint8_t last_gyro_bdr = 0xff;
+static uint8_t last_ext_bdr = 0xff;
+
+static uint32_t time_slot_factor = 1;
+static uint8_t cur_time_slot = 0;
+static uint32_t track_time_slot = 0;
+
 LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
 
-int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+static int update_time_scale()
+{
+	float max_odr = MAX(DSV_ODR_GYRO_MAP[last_gyro_odr], DSV_ODR_ACCEL_MAP[last_accel_odr]);
+	float max_bdr = MAX(DSV_BDR_GYRO_MAP[last_gyro_bdr], DSV_BDR_ACCEL_MAP[last_accel_bdr]);
+	time_slot_factor = (int)round(max_odr/max_bdr);
+}
+
+int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time, float *timestep_us)
 {
 	int err = i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_CTRL6, DSV_FS_G_2000DPS); // set gyro FS
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_CTRL8, DSV_FS_XL_16G); // set accel FS
-	if (err)
-		LOG_ERR("I2C error");
-	last_accel_odr = 0xff; // reset last odr
-	last_gyro_odr = 0xff; // reset last odr
+	// Initialise ODRs
+	last_accel_odr = last_gyro_odr = 0xff; // reset last odr
+	last_accel_bdr = last_gyro_bdr = last_ext_bdr = 0; // reset last bdr
 	err |= lsm_update_odr(dev_i2c, accel_time, gyro_time, accel_actual_time, gyro_actual_time);
-	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FIFO_CTRL4, 0x06); // enable Continuous mode
-	if (err)
-		LOG_ERR("I2C error");
+	// Set initial BDR, any later changes should be detected via FIFO packets
+	last_accel_bdr = last_accel_odr;
+	last_gyro_bdr = last_gyro_odr;
+	// Init timesync
+	cur_time_slot = 0;
+	track_time_slot = 0;
+	err |= update_time_scale();
+	*timestep_us = 1.0f/MAX(DSV_ODR_GYRO_MAP[last_gyro_odr], DSV_ODR_ACCEL_MAP[last_accel_odr]);
+	// Enable Continuous mode, with lowest ODR for timestamp and temperature
+	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FIFO_CTRL4, 0xC0 | 0x10 | 0x06);
+	// Enable timestamp (else timestamp packets will be 0)
+	//err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FUNCTIONS_ENABLE, 0x40);
 	if (use_ext_fifo)
 		err |= lsm_ext_init(dev_i2c, ext_addr, ext_reg);
+	if (err)
+		LOG_ERR("I2C error");
 	return (err < 0 ? err : 0);
 }
 
 void lsm_shutdown(const struct i2c_dt_spec *dev_i2c)
 {
-	last_accel_odr = 0xff; // reset last odr
-	last_gyro_odr = 0xff; // reset last odr
+	last_accel_odr = last_gyro_odr = 0xff; // reset last odr
+	last_accel_bdr = last_gyro_bdr = last_ext_bdr = 0xff; // reset last bdr
 	int err = i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_CTRL3, 0x01); // SW_RESET
 	if (err)
 		LOG_ERR("I2C error");
@@ -211,6 +236,118 @@ float lsm_temp_read(const struct i2c_dt_spec *dev_i2c)
 	return temp;
 }
 
+static inline bool lsm6dsv_parse_fifo_packet(sensor_packet_t *packet, uint8_t data[PACKET_SIZE])
+{
+	{ // TODO: Configure timestamps?
+		// Track advances in timestamp via a 3-bit timeslot in packets
+		int time_slot = (data[0] >> 1) & 0x3;
+		int diff_slots = time_slot-cur_time_slot;
+		if (diff_slots < -1) diff_slots += 4;
+		cur_time_slot = time_slot;
+		// Update timestamp with advance in timeslot
+		track_time_slot += diff_slots * time_slot_factor;
+		//uint32_t slot_to_us = 1000000/MAX(DSV_ODR_GYRO_MAP[last_gyro_odr], DSV_ODR_ACCEL_MAP[last_accel_odr]);
+		packet->timestep = track_time_slot; // Could convert to us, but overflow behaviour would become less predictable
+	}
+
+	int sensorTag = data[0] >> 3;
+	switch (sensorTag)
+	{
+		case 0x01:
+			packet->tag = SENSOR_GYRO;
+			for (int i = 0; i < 3; i++) // x, y, z
+			{
+				packet->data.gyro[i] = (int16_t)(data[i*2 + 1] | (((uint16_t)data[i*2 + 2]) << 8));
+				packet->data.gyro[i] *= gyro_sensitivity;
+			}
+			return true;
+		case 0x02:
+			packet->tag = SENSOR_ACCEL;
+			for (int i = 0; i < 3; i++) // x, y, z
+			{
+				packet->data.accel[i] = (int16_t)(data[i*2 + 1] | (((uint16_t)data[i*2 + 2]) << 8));
+				packet->data.accel[i] *= accel_sensitivity;
+			}
+			return true;
+		case 0x03:
+			packet->tag = SENSOR_TEMP;
+			packet->data.temp[0] = (int16_t)(data[1] | (((uint16_t)data[2]) << 8));
+			packet->data.temp[0] = packet->data.temp[0] / 256 + 25;
+			return true;
+		case 0x04:
+		{
+			// Not using timestamps, doesn't make much sense if we can track time slots
+			// Needs synchronisation and estimation of drift either way
+			// Test implementation at https://github.com/Seneral/SlimeVR-Tracker-nRF/tree/timestamps-us 
+			//uint32_t timestamp = data[1] | (((uint32_t)data[2]) << 8)
+			//	| (((uint32_t)data[3]) << 16) | (((uint32_t)data[4]) << 24);
+			// Check if BDRs changed
+			uint8_t ext_bdr = data[5] & 0x0F, accel_bdr = data[6] & 0x0F, gyro_bdr = (data[6] >> 4) & 0x0F;
+			if (gyro_bdr != last_gyro_bdr || accel_bdr != last_accel_bdr || ext_bdr != last_ext_bdr)
+			{
+				LOG_WRN("Set Gyro BDR from %f to %f with ODR at %f!",
+					DSV_BDR_GYRO_MAP[last_gyro_bdr], DSV_BDR_GYRO_MAP[gyro_bdr], DSV_ODR_GYRO_MAP[last_gyro_odr]);
+				last_gyro_bdr = gyro_bdr;
+				last_accel_bdr = accel_bdr;
+				last_ext_bdr = ext_bdr;
+				packet->tag = SENSOR_UPDATE;
+				packet->data.BDRupdate[0] = DSV_BDR_GYRO_MAP[last_gyro_bdr];
+				packet->data.BDRupdate[1] = DSV_BDR_ACCEL_MAP[last_accel_bdr];
+				packet->data.BDRupdate[2] = DSV_BDR_EXT_MAP[last_ext_bdr];
+				return true;
+			}
+			return false;
+		}
+		case 0x05:
+			// TODO: Add CFG-change fifo packets to detect ODR & BDR changes
+			// Relying on timestamp packet for BDR changes for now
+			// These are currently not enabled, set ODRCHG_EN
+			LOG_ERR("IMU CFG-Change packet not implemented!");
+			return false;
+		case 0x0E:
+			packet->tag = SENSOR_EXT;
+			memcpy(packet->data.ext, &data[1], 6);
+			return true;
+		default:
+			// NOT IMPLEMENTED
+			LOG_ERR("IMU FIFO Packet %d not implemented!", sensorTag);
+			return false;
+	}
+}
+
+int lsm6dsv_fetch_sensor_packets(const struct i2c_dt_spec *dev_i2c, int max_count, handle_sensor_packet_t cb, void *userdata)
+{
+	int err = 0;
+	uint16_t total = 0;
+	uint16_t count = UINT16_MAX;
+	uint8_t rawCount[2];
+	err |= i2c_burst_read_dt(dev_i2c, LSM6DSV_FIFO_STATUS1, &rawCount[0], 2);
+	count = (uint16_t)((rawCount[1] & 3) << 8 | rawCount[0]); // Turn the 16 bits into a unsigned 16-bit value
+	if (count > max_count) count = max_count;
+
+	uint8_t fifoBuffer[PACKET_SIZE];
+	uint8_t fifoRegister = LSM6DSV_FIFO_DATA_OUT_TAG;
+	struct i2c_msg fifoMsgs[2] = {
+		{ &fifoRegister, 1, I2C_MSG_WRITE },
+		{ fifoBuffer, PACKET_SIZE, I2C_MSG_RESTART | I2C_MSG_READ | I2C_MSG_STOP }
+	};
+	// TODO: Make use of wraparound and direct access to dev_i2c->bus->api->transfer to NOT send I2C_MSG_STOP
+	// That way, we can just not send the fifoRegister again, and just keep reading continuously
+	sensor_packet_t fifoPacket;
+	for (int i = 0; i < count; i++)
+	{
+		err |= i2c_transfer_dt(dev_i2c, fifoMsgs, 2);
+		if (lsm6dsv_parse_fifo_packet(&fifoPacket, fifoBuffer))
+		{ // Parsed a sensor_packet that should be exposed
+			cb(userdata, fifoPacket);
+			total++;
+		}
+	}
+	if (err)
+		LOG_ERR("I2C error");
+	return total;
+}
+
 void lsm_setup_WOM(const struct i2c_dt_spec *dev_i2c)
 { // TODO: should be off by the time WOM will be setup
 //	i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_CTRL1, DSV_ODR_OFF); // set accel off
@@ -237,6 +374,7 @@ void lsm_setup_WOM(const struct i2c_dt_spec *dev_i2c)
 	err |= i2c_burst_write_dt(dev_i2c, LSM6DSV_X_OFS_USR, offset, 3); // set offset correction
 
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FUNCTIONS_ENABLE, 0x80); // enable interrupts
+	//err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FUNCTIONS_ENABLE, 0x80 | 0x40); // enable interrupts and timestamp
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_MD1_CFG, 0x20); // route wake-up to INT1
 	if (err)
 		LOG_ERR("I2C error");
@@ -315,6 +453,8 @@ extern const sensor_imu_t sensor_imu_lsm6dsv = {
 	*lsm_temp_read,
 
 	*lsm_setup_WOM,
+
+	*lsm6dsv_fetch_sensor_packets,
 	
 	*lsm_ext_setup,
 	*lsm_fifo_process_ext,

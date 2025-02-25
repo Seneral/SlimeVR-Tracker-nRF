@@ -149,7 +149,7 @@ static const float DSV_BDR_EXT_MAP[] = {
 	104
 };
 
-int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time, float *timestep_us);
 void lsm_shutdown(const struct i2c_dt_spec *dev_i2c);
 
 int lsm_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
@@ -161,6 +161,8 @@ void lsm_gyro_read(const struct i2c_dt_spec *dev_i2c, float g[3]);
 float lsm_temp_read(const struct i2c_dt_spec *dev_i2c);
 
 void lsm_setup_WOM(const struct i2c_dt_spec *dev_i2c);
+
+int lsm6dsv_fetch_sensor_packets(const struct i2c_dt_spec *dev_i2c, int max_count, handle_sensor_packet_t cb, void *userdata);
 
 int lsm_ext_setup(uint8_t ext_addr, uint8_t ext_reg);
 int lsm_fifo_process_ext(uint16_t index, uint8_t *data, float a[3], float g[3], uint8_t *raw_m);

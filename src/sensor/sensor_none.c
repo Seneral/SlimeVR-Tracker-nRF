@@ -33,7 +33,8 @@ int imu_none_init(
 	float accel_time,
 	float gyro_time,
 	float* accel_actual_time,
-	float* gyro_actual_time
+	float* gyro_actual_time,
+	float* timestep_us
 ) {
 	LOG_DBG("imu_none_init, sensor has no IMU or IMU cannot be initialized");
 	return -1;

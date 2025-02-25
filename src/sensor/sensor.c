@@ -69,6 +69,8 @@ static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
 
+static float timestep_us; // Time in us represented by one time slot (may be sensor and ODR specifc)
+
 static bool sensor_fusion_init;
 static bool sensor_sensor_init;
 
@@ -444,7 +446,7 @@ int main_imu_init(void) {
 	float accel_initial_time = 1.0 / CONFIG_SENSOR_ACCEL_ODR; // configure with ~1000Hz ODR
 	float gyro_initial_time = 1.0 / CONFIG_SENSOR_GYRO_ODR; // configure with ~1000Hz ODR
 	float mag_initial_time = 1.0 / CONFIG_SENSOR_MAG_ODR; // configure with ~200Hz ODR
-	err = sensor_imu->init(&sensor_imu_dev, clock_actual_rate, accel_initial_time, gyro_initial_time, &accel_actual_time, &gyro_actual_time);
+	err = sensor_imu->init(&sensor_imu_dev, clock_actual_rate, accel_initial_time, gyro_initial_time, &accel_actual_time, &gyro_actual_time, &timestep_us);
 	LOG_INF("Accelerometer initial rate: %.2fHz", 1.0 / (double)accel_actual_time);
 	LOG_INF("Gyrometer initial rate: %.2fHz", 1.0 / (double)gyro_actual_time);
 	if (err < 0) {
@@ -524,6 +526,107 @@ static bool send_info = false;
 
 static int packet_errors = 0;
 
+static float lastGyro[3], lastAccel[3], lastMag[3];
+
+static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
+{
+	// TODO: Implement specific delta time for each fusion update once they make use of it
+	//int ds = packet.time_slot - lastSlotOfSensor;
+	//float dt = (float)ds*timestep_us;
+	float dt = timestep_us;
+
+	switch (packet.tag)
+	{
+		case SENSOR_UPDATE:
+		{ // BDR has been updated
+			gyro_actual_time = 1.0f/packet.data.BDRupdate[0];
+			accel_actual_time = 1.0f/packet.data.BDRupdate[1];
+			if (use_ext_fifo && packet.data.BDRupdate[2] > 0)
+				mag_actual_time = 1.0f/packet.data.BDRupdate[2];
+			// TODO: Could implement an interface like this to adapt to new data rates after this
+			//sensor_fusion->update_rates(gyro_actual_time, accel_actual_time, mag_actual_time);
+			break;
+		}
+		case SENSOR_GYRO:
+		{ // Integrate gyroscope
+			float* gyroBias = sensor_calibration_get_gyroBias();
+			float gx = packet.data.gyro[0] - gyroBias[0];  // gres
+			float gy = packet.data.gyro[1] - gyroBias[1];  // gres
+			float gz = packet.data.gyro[2] - gyroBias[2];  // gres
+			float g[] = {SENSOR_GYROSCOPE_AXES_ALIGNMENT};
+			sensor_fusion->update_gyro(g, dt);
+
+			memcpy(lastGyro, g, sizeof(g));
+
+			if (mag_available && mag_enabled)
+			{
+				// Get fusion's corrected gyro packet.data (or get gyro bias from fusion) and use it here
+				float g_off[3] = {};
+				sensor_fusion->get_gyro_bias(g_off);
+				for (int i = 0; i < 3; i++) {
+					g_off[i] = g[i] - g_off[i];
+				}
+
+				// Get the highest gyro speed
+				float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1]
+										+ g_off[2] * g_off[2];
+				if (gyro_speed_square > max_gyro_speed_square) {
+					max_gyro_speed_square = gyro_speed_square;
+				}
+			}
+			break;
+		}
+		case SENSOR_ACCEL:
+		{ // Integrate accelerometer
+		#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+			apply_BAinv(packet.data.accel, sensor_calibration_get_accBAinv());
+			float ax = packet.data.accel[0];
+			float ay = packet.data.accel[1];
+			float az = packet.data.accel[2];
+		#else
+			float* accelBias = sensor_calibration_get_accelBias();
+			float ax = packet.data.accel[0] - accelBias[0];
+			float ay = packet.data.accel[1] - accelBias[1];
+			float az = packet.data.accel[2] - accelBias[2];
+		#endif
+			float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
+			sensor_fusion->update_accel(a, dt);
+
+			memcpy(lastAccel, a, sizeof(a));
+			break;
+		}
+		case SENSOR_TEMP:
+		{
+			connection_update_sensor_temp(packet.data.temp[0]);
+			break;
+		}
+		case SENSOR_MAG:
+		{
+//			float* magBias = sensor_calibration_get_magBias();
+//			for (int i = 0; i < 3; i++) {
+//				packet.data.mag[i] -= magBias[i];
+//			}
+			sensor_sample_mag(lastAccel, packet.data.mag);  // 400us
+			apply_BAinv(packet.data.mag, sensor_calibration_get_magBAinv());
+			float mx = packet.data.mag[0];
+			float my = packet.data.mag[1];
+			float mz = packet.data.mag[2];
+			float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
+			sensor_fusion->update_mag(m, dt);
+
+			memcpy(lastMag, m, sizeof(m));
+
+			// Update fusion gyro sanity?
+			sensor_fusion->update_gyro_sanity(lastGyro, lastMag);
+			break;
+		}
+		case SENSOR_EXT:
+		{
+			LOG_ERR("Integrating external mag measurements is not implemented yet!");
+			break;
+		}
+	}
+
 void main_imu_thread(void) {
 	main_running = true;
 	int err = main_imu_init();  // Initialize IMUs and Fusion
@@ -546,60 +649,45 @@ void main_imu_thread(void) {
 			bool reconfig = last_sensor_mode != sensor_mode;
 			last_sensor_mode = sensor_mode;
 
-			// Reading IMUs will take between 2.5ms (~7 samples, low noise) - 7ms (~33 samples, low power)
-			// Magneto sample will take ~400us
-			// Fusing data will take between 100us (~7 samples, low noise) - 500us (~33 samples, low power) for xiofusion
-			// TODO: on any errors set main_ok false and skip (make functions return nonzero)
-
 			// At high speed, use oneshot mode to have synced magnetometer data
 			// Call before FIFO and get the data after
 			if (mag_available && mag_enabled && mag_use_oneshot) {
 				sensor_mag->mag_oneshot(&sensor_mag_dev);
 			}
 
-			// Read IMU temperature
-			float temp = sensor_imu->temp_read(&sensor_imu_dev); // TODO: use as calibration data
-			connection_update_sensor_temp(temp);
-
-			// Read gyroscope (FIFO)
-			uint16_t packets = sensor_imu->fifo_read(&sensor_imu_dev, rawData, 1024);
-			LOG_DBG("IMU packet count: %u", packets);
-
-			// Read accelerometer
-			float raw_a[3];
-			sensor_imu->accel_read(&sensor_imu_dev, raw_a);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-			apply_BAinv(raw_a, sensor_calibration_get_accBAinv());
-			float ax = raw_a[0];
-			float ay = raw_a[1];
-			float az = raw_a[2];
-#else
-			float* accelBias = sensor_calibration_get_accelBias();
-			float ax = raw_a[0] - accelBias[0];
-			float ay = raw_a[1] - accelBias[1];
-			float az = raw_a[2] - accelBias[2];
-#endif
-			float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
-
-			// Read magnetometer and process magneto
-			float mx = 0, my = 0, mz = 0;
-			if (mag_available && mag_enabled
-				&& sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE) {
-				float m[3];
-				sensor_mag->mag_read(&sensor_mag_dev, m);
-//				float* magBias = sensor_calibration_get_magBias();
-//				for (int i = 0; i < 3; i++) {
-//					m[i] -= magBias[i];
-//				}
-				sensor_sample_mag(a, m);  // 400us
-				apply_BAinv(m, sensor_calibration_get_magBAinv());
-				mx = m[0];
-				my = m[1];
-				mz = m[2];
+			// Fetch all packets currently in FIFO
+			max_gyro_speed_square = 0;
+			int processed_packets = sensor_imu->fetch_sensor_packets(&sensor_imu_dev, 1000, parse_sensor_packet, NULL);
+			if (processed_packets > 0)
+			{
+				packet_errors = 0;
 			}
-			float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
+			else
+			{ // No packets
+				LOG_WRN("No packets processed");
+				if (++packet_errors == 10) {
+					LOG_ERR("Packet error threshold exceeded");
+					set_status(SYS_STATUS_SENSOR_ERROR, true);  // kind of redundant
+					sensor_retained_write();  // keep the fusion state
+					sys_request_system_reboot();
+				}
+			}
 
-			if (reconfig)  // TODO: get rid of reconfig?
+			if (mag_available && mag_enabled
+				&& sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE)
+			{ // Read oneshot manually
+				// TODO: Integrate properly in correct timely manner
+				// Could be via main IMU EXT (IMU as sensor hub)
+				// Or by making oneshot generate an interrupt at which to call then
+				// Just need to take care of any callback priority conflicts then
+				sensor_packet_t packet;
+				packet.tag = SENSOR_MAG;
+				sensor_mag->mag_read(&sensor_mag_dev, packet.data.mag);
+				packet.timestep = 0;
+				parse_sensor_packet(NULL, packet);
+			}
+
+			if (reconfig)
 			{
 				switch (sensor_mode) {
 					case SENSOR_SENSOR_MODE_LOW_NOISE:
@@ -633,103 +721,6 @@ void main_imu_thread(void) {
 				};
 			}
 
-			// Fuse all data
-			float a_sum[3] = {0};
-			int a_count = 0;
-			float g[3] = {0};
-			max_gyro_speed_square = 0;
-			int processed_packets = 0;
-			float* gyroBias = sensor_calibration_get_gyroBias();
-			for (uint16_t i = 0; i < packets; i++)
-			{ // TODO: fifo_process_ext is available, need to implement it
-				float raw_a[3] = {0};
-				float raw_g[3] = {0};
-				if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g))
-					continue; // skip on error
-
-				// TODO: split into separate functions
-				if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0)
-				{
-					float gx = raw_g[0] - gyroBias[0]; //gres
-					float gy = raw_g[1] - gyroBias[1]; //gres
-					float gz = raw_g[2] - gyroBias[2]; //gres
-					float aligned[] = {SENSOR_GYROSCOPE_AXES_ALIGNMENT};
-					memcpy(g, aligned, sizeof(g));
-
-					// Process fusion
-					sensor_fusion->update_gyro(g, gyro_actual_time);
-
-					if (mag_available && mag_enabled)
-					{
-						// Get fusion's corrected gyro data (or get gyro bias from fusion) and use it here
-						float g_off[3] = {};
-						sensor_fusion->get_gyro_bias(g_off);
-						for (int i = 0; i < 3; i++)
-							g_off[i] = g[i] - g_off[i];
-	
-						// Get the highest gyro speed
-						float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
-						if (gyro_speed_square > max_gyro_speed_square)
-							max_gyro_speed_square = gyro_speed_square;
-					}
-				}
-
-				if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0)
-				{
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-					apply_BAinv(raw_a, sensor_calibration_get_accBAinv());
-					float ax = raw_a[0];
-					float ay = raw_a[1];
-					float az = raw_a[2];
-#else
-					float ax = raw_a[0] - accelBias[0];
-					float ay = raw_a[1] - accelBias[1];
-					float az = raw_a[2] - accelBias[2];
-#endif
-					float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
-
-					// Process fusion
-					sensor_fusion->update_accel(a, accel_actual_time);
-
-					for (int i = 0; i < 3; i++)
-						a_sum[i] += a[i];
-					a_count++;
-				}
-
-				processed_packets++;
-			}
-			sensor_fusion->update_mag(m, 1.0 / fusion_update_rate); // TODO: use actual time?
-
-			// Copy average acceleration for this frame
-			if (a_count > 0)
-			{
-				for (int i = 0; i < 3; i++)
-					a[i] = a_sum[i] / a_count;
-			}
-			else
-			{
-				for (int i = 0; i < 3; i++)
-					a[i] = 0;
-			}
-
-			// Check packet processing
-			if (processed_packets == 0) {
-				LOG_WRN("No packets processed");
-				if (++packet_errors == 10) {
-					LOG_ERR("Packet error threshold exceeded");
-					set_status(SYS_STATUS_SENSOR_ERROR, true);  // kind of redundant
-					sensor_retained_write();  // keep the fusion state
-					sys_request_system_reboot();
-				}
-			} else if (processed_packets < packets) {
-				LOG_WRN("Only %u/%u packets processed", processed_packets, packets);
-			} else {
-				packet_errors = 0;
-			}
-
-			// Update fusion gyro sanity?
-			sensor_fusion->update_gyro_sanity(g, m);
-
 			// Get updated quaternion from fusion
 			sensor_fusion->get_quat(q);
 			q_normalize(q, q);  // safe to use self as output
@@ -741,7 +732,7 @@ void main_imu_thread(void) {
 			vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
 			vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
 			for (int i = 0; i < 3; i++)
-				lin_a[i] = (a[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
+				lin_a[i] = (lastAccel[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
 
 			// Check the IMU gyroscope
 			if (sensor_fusion->get_gyro_sanity() == 0

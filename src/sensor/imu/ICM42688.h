@@ -108,7 +108,7 @@
 #define gMode_SBY 0x01
 #define gMode_LN  0x03
 
-int icm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int icm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time, float *timestep_us);
 void icm_shutdown(const struct i2c_dt_spec *dev_i2c);
 
 int icm_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
