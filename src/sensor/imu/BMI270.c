@@ -346,6 +346,44 @@ float bmi_temp_read(const struct i2c_dt_spec *dev_i2c)
 	return temp;
 }
 
+static uint8_t* rawData = NULL;
+int bmi_fetch_sensor_packets(const struct i2c_dt_spec *dev_i2c, int max_count, handle_sensor_packet_t cb, void *userdata)
+{
+	// TODO: Polyfill. Replace
+	if (max_count > 50) max_count = 50;
+	int cbcnt = 0; // Never call more than max_count times
+	sensor_packet_t fifoPacket;
+	fifoPacket.timestampUS = 0; // Not supported
+	// Read temperature sensor since that is not part of the fifo
+	fifoPacket.data.temp[0] = bmi_temp_read(dev_i2c);
+	fifoPacket.tag = SENSOR_TEMP;
+	cb(userdata, fifoPacket); cbcnt++;
+	// Read fifo at once into buffer
+	if (!rawData) rawData = (uint8_t*)k_malloc(PACKET_SIZE*50);
+	uint16_t count = bmi_fifo_read(dev_i2c, rawData, PACKET_SIZE*max_count);
+	// Process fifo packets and push as sensor packets to callback
+	float a[3], g[3];
+	for (int i = 0; i < count; i++)
+	{
+		if (cbcnt+2 > max_count) break; // Should not happen
+		bmi_fifo_process(i, rawData, a, g);
+		if (a[0] != 0 || a[1] != 0 || a[2] != 0)
+		{
+			memcpy(fifoPacket.data.accel, a, sizeof(a));
+			fifoPacket.tag = SENSOR_ACCEL;
+			cb(userdata, fifoPacket); cbcnt++;
+		}
+		if (g[0] != 0 || g[1] != 0 || g[2] != 0)
+		{
+			memcpy(fifoPacket.data.gyro, g, sizeof(g));
+			fifoPacket.tag = SENSOR_GYRO;
+			cb(userdata, fifoPacket); cbcnt++;
+		}
+	}
+	return cbcnt;
+}
+
+
 void bmi_setup_WOM(const struct i2c_dt_spec *dev_i2c) // TODO: seems too sensitive? try to match icm at least // TODO: half working.
 {
 	uint8_t config[4] = {0};
@@ -415,6 +453,8 @@ extern const sensor_imu_t sensor_imu_bmi270 = {
 	*bmi_temp_read,
 
 	*bmi_setup_WOM,
+
+	*bmi_fetch_sensor_packets,
 	
 	*imu_none_ext_setup,
 	*imu_none_fifo_process_ext,

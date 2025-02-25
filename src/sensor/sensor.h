@@ -69,6 +69,35 @@ typedef struct sensor_fusion {
 	void (*get_quat)(float*);
 } sensor_fusion_t;
 
+typedef enum sensor_data_tag
+{
+	SENSOR_UPDATE, // No data to read, update ODRs
+	SENSOR_GYRO,
+	SENSOR_ACCEL,
+	SENSOR_MAG,
+	SENSOR_TEMP,
+	SENSOR_EXT,
+} sensor_data_tag_t;
+
+typedef union sensor_data
+{
+	float BDRupdate[3]; // Gyro, Accel, Ext
+	float gyro[3]; // x, y, z
+	float accel[3]; // x, y, z
+	float mag[3]; // x, y, z
+	float temp[3]; // Only first value is valid
+	uint8_t ext[6]; // raw
+} sensor_data_t;
+
+typedef struct sensor_packet
+{
+	sensor_data_tag_t tag;
+	sensor_data_t data;
+	uint32_t timestampUS;
+} sensor_packet_t;
+
+typedef void (*handle_sensor_packet_t)(void *userdata, sensor_packet_t packet);
+
 typedef struct sensor_imu {
 	int (*init)(const struct i2c_dt_spec*, float, float, float, float*, float*); // first float is clock_rate, nonzero means use CLKIN, return update time, return 0 if success, -1 if general error
 	void (*shutdown)(const struct i2c_dt_spec*);
@@ -82,6 +111,8 @@ typedef struct sensor_imu {
 	float (*temp_read)(const struct i2c_dt_spec*); // deg C
 
 	void (*setup_WOM)(const struct i2c_dt_spec*);
+
+	int (*fetch_sensor_packets)(const struct i2c_dt_spec *dev_i2c, int max_count, handle_sensor_packet_t cb, void *userdata);
 
 	int (*ext_setup)(uint8_t, uint8_t); // setup external magnetometer
 	int (*fifo_process_ext)(uint16_t, uint8_t*, float[3], float[3], uint8_t*); // g, deg/s, raw magnetometer data
