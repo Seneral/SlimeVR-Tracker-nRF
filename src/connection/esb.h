@@ -37,6 +37,9 @@ extern bool send_data;
 // TODO: esb/sensor?
 extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
+// TX stats
+extern uint32_t tx_errors;
+extern uint64_t tx_timestamp;
 
 void event_handler(struct esb_evt const* event);
 int clocks_start(void);
@@ -49,7 +52,7 @@ void esb_set_addr_paired(void);
 void esb_pair(void);
 void esb_reset_pair(void);
 
-void esb_write(uint8_t* data);  // TODO: give packets some names
+void esb_write(uint8_t *data, uint8_t size);
 
 bool esb_ready(void);
 

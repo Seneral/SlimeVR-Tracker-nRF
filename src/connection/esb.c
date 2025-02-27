@@ -44,12 +44,12 @@ uint16_t led_clock = 0;
 uint32_t led_clock_offset = 0;
 
 uint32_t tx_errors = 0;
+uint64_t tx_timestamp = 0;
 
 static struct esb_payload rx_payload;
-static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
-														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+static struct esb_payload tx_payload;
 static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0,
-														  0, 0, 0, 0, 0, 0, 0, 0);
+														  HEADER_PAIR, 0, 0, 0, 0, 0, 0, 0, 0);
 
 static uint8_t paired_addr[8] = {0};
 
@@ -60,11 +60,13 @@ void event_handler(struct esb_evt const *event)
 	switch (event->evt_id)
 	{
 	case ESB_EVENT_TX_SUCCESS:
+		tx_timestamp = k_ticks_to_us_floor64(k_uptime_ticks());
 		if (tx_errors >= 100)
 			set_status(SYS_STATUS_CONNECTION_ERROR, false);
 		tx_errors = 0;
 		break;
 	case ESB_EVENT_TX_FAILED:
+		tx_timestamp = 0;
 		if (++tx_errors == 100) // consecutive failure to transmit
 			set_status(SYS_STATUS_CONNECTION_ERROR, true);
 		LOG_DBG("TX FAILED");
@@ -74,8 +76,18 @@ void event_handler(struct esb_evt const *event)
 		{
 			if (!paired_addr[0]) // zero, not paired
 			{
-				if (rx_payload.length == 8)
-					memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
+				if (rx_payload.length == 9 && rx_payload.data[0] == HEADER_PAIR)
+				{
+					if (rx_payload.data[1] == tx_payload_pair.data[1])
+					{ // Received accepting packet, double check in other thread
+						LOG_INF("Receiver accepted pairing request!");
+					 	memcpy(paired_addr, rx_payload.data+1, 8); // Signals pairing thread
+					}
+					else
+					{ // Response from a receiver that is accepting pairing requests, but hasn't processed our request yet
+						LOG_INF("Found receiver in pairing mode, waiting for it to accept pairing!");
+					}
+				}
 			}
 			else
 			{
@@ -302,25 +314,32 @@ void esb_pair(void)
 	// Read paired address from retained
 	// TODO: should pairing data stay within esb?
 	memcpy(paired_addr, retained.paired_addr, sizeof(paired_addr));
+	uint8_t checksum = crc8_ccitt(0x07, &paired_addr[2], 6);
+	if (paired_addr[0] != checksum)
+	{
+		LOG_ERR("Checksum mismatch of stored paired address! %d != %d", paired_addr[0], checksum);
+		memset(paired_addr, 0, sizeof(paired_addr));
+	}
 
-	if (!paired_addr[0]) // zero, no receiver paired
+	if (!paired_addr[0]) // zero checksum, no receiver paired
 	{
 		LOG_INF("Pairing");
 		esb_set_addr_discovery();
 		esb_initialize(true);
 //		timer_init(); // TODO: shouldn't be here!!!
 		tx_payload_pair.noack = false;
+		tx_payload_pair.data[0] = 0; // Indicate this is a pairing packet
 		uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is not actually guaranteed, see datasheet)
-		memcpy(&tx_payload_pair.data[2], addr, 6);
+		memcpy(&tx_payload_pair.data[3], addr, 6);
 		LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
-		uint8_t checksum = crc8_ccitt(0x07, &tx_payload_pair.data[2], 6);
+		checksum = crc8_ccitt(0x07, &tx_payload_pair.data[3], 6);
 		if (checksum == 0)
 			checksum = 8;
 		LOG_INF("Checksum: %02X", checksum);
-		tx_payload_pair.data[0] = checksum; // Use checksum to make sure packet is for this device
+		tx_payload_pair.data[1] = checksum; // Use checksum to make sure packet is for this device
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 		while (paired_addr[0] != checksum)
-		{
+		{ // Send tx_payload_pair and wait for a response that matches our checksum
 			if (paired_addr[0])
 			{
 				LOG_INF("Incorrect checksum: %02X", paired_addr[0]);
@@ -330,8 +349,11 @@ void esb_pair(void)
 			esb_flush_tx();
 			esb_write_payload(&tx_payload_pair);
 			esb_start_tx();
+			// Sending, expecting an ACK with payload as response with same checksum
 			k_msleep(1000);
 		}
+		// Replace our checksum used for communication with receiver checksum
+		paired_addr[0] = crc8_ccitt(0x07, &paired_addr[2], 6);
 		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
 		LOG_INF("Paired");
 		sys_write(PAIRED_ID, retained.paired_addr, paired_addr, sizeof(paired_addr)); // Write new address and tracker id
@@ -339,7 +361,7 @@ void esb_pair(void)
 		k_msleep(1600); // wait for led pattern
 	}
 	LOG_INF("Tracker ID: %u", paired_addr[1]);
-	LOG_INF("Receiver address: %012llX", (*(uint64_t *)&retained.paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
+	LOG_INF("Receiver address: %012llX", (*(uint64_t *)retained.paired_addr >> 16) & 0xFFFFFFFFFFFF);
 
 	connection_set_id(paired_addr[1]);
 
@@ -356,7 +378,7 @@ void esb_reset_pair(void)
 	LOG_INF("Pairing data reset");
 }
 
-void esb_write(uint8_t *data)
+void esb_write(uint8_t *data, uint8_t size)
 {
 	if (!esb_initialized || !esb_paired)
 		return;
@@ -365,8 +387,9 @@ void esb_write(uint8_t *data)
 #else
 	tx_payload.noack = false;
 #endif
-	memcpy(tx_payload.data, data, tx_payload.length);
 	esb_flush_tx(); // this will clear all transmissions even if they did not complete
+	memcpy(tx_payload.data, data, size);
+	tx_payload.length = size;
 	esb_write_payload(&tx_payload); // Add transmission to queue
 	send_data = true;
 }

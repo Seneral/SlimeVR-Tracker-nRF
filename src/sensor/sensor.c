@@ -856,21 +856,19 @@ void main_imu_thread(void) {
 
 			// Send packet with new orientation
 			if (!q_epsilon(q, last_q, 0.001)) {
-				bool send_precise_quat = q_epsilon(q, last_q, 0.005);
 				memcpy(last_q, q, sizeof(q));
 				float q_offset[4];
 				q_multiply(q, q3, q_offset);
 				v_rotate(lin_a, q3, lin_a);
-				connection_update_sensor_data(q_offset, lin_a);
-				if (send_info && !send_precise_quat)  // prioritize quat precision
-				{
-					connection_write_packet_2();
+				connection_update_sensor_data(q_offset, lin_a, synced_time_us);
+				if (send_info) {
+					connection_write_sensors_timestamped_status();
 					send_info = false;
 				} else {
-					connection_write_packet_1();
+					connection_write_sensors_timestamped();
 				}
 			} else if (send_info) {
-				connection_write_packet_0();
+				connection_write_info_status();
 				send_info = false;
 			}
 

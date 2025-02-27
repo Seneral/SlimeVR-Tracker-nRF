@@ -66,4 +66,7 @@ void apply_BAinv(float xyz[3], float BAinv[4][3]);
 void q_fem(const float* q, float* out);
 void q_iem(const float* v, float* out);
 
+void q_cayley_f(const float q[4], float out[3]);
+void q_cayley_inv(const float v[3], float out[4]);
+
 #endif

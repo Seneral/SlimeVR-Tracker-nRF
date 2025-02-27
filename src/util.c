@@ -146,3 +146,21 @@ void q_iem(const float* v, float* out) {
 	out[2] = k * v[1];
 	out[3] = k * v[2];
 }
+
+void q_cayley_f(const float q[4], float out[3])
+{
+	float s = 1 / (1 + q[0]);
+	out[0] = q[1] * s;
+	out[1] = q[2] * s;
+	out[2] = q[3] * s;
+}
+
+void q_cayley_inv(const float v[3], float out[4])
+{
+	float d = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+	float s = 2 / (1 + sqrtf(d));
+	out[1] = v[0] * s;
+	out[2] = v[1] * s;
+	out[3] = v[2] * s;
+	out[0] = s - 1;
+}

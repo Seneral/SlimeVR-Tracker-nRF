@@ -21,6 +21,7 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
+#include "connection.h"
 #include "util.h"
 #include "esb.h"
 #include "build_defines.h"
@@ -28,6 +29,7 @@
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3];
+static uint64_t sensor_timestamp_us = 0;
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -47,10 +49,11 @@ void connection_update_sensor_ids(int imu, int mag)
 	mag_id = get_server_constant_mag_id(mag);
 }
 
-void connection_update_sensor_data(float *q, float *a)
+void connection_update_sensor_data(float *q, float *a, uint64_t timestamp_us)
 {
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
+	sensor_timestamp_us = timestamp_us;
 }
 
 void connection_update_sensor_temp(float temp)
@@ -99,90 +102,101 @@ void connection_update_status(int status)
 	tracker_svr_status = get_server_constant_tracker_status(status);
 }
 
-//|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
-//|type    |id      |packet data                                                                                                                  |
-//|0       |id      |batt    |batt_v  |temp    |brd_id  |mcu_id  |resv    |imu_id  |mag_id  |fw_date          |major   |minor   |patch   |rssi    |
-//|1       |id      |q0               |q1               |q2               |q3               |a0               |a1               |a2               |
-//|2       |id      |batt    |batt_v  |temp    |q_buf                              |a0               |a1               |a2               |rssi    |
-//|3	   |id      |svr_stat|status  |resv                                                                                              |rssi    |
+// Building blocks: Status (3B), Info (10B), Timestamps (3B), Data(1-14B) - e.g. IMU(12B)
+// LEN:  |t:3|id:5|b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |b16     |b17     |b18     |
+//    8: |00000000|Checksum|pairing adress                                       |
+//   14: |001|id  |brd_id  |mcu_id  |RESV    |imu_id  |mag_id  |fw_date          |major   |minor   |patch   |batt    |batt_v  |temp    |
+// <=15: |XXX|id  |DATA (up to 14B)                                                                                                             |
+//   16: |XXX|id  |DATA (12B)                                                                                                 |timestamp imu[12] last[12]|
+//   19: |XXX|id  |DATA (12B)                                                                                                 |timestamp imu[12] last[12]|batt    |batt_v  |temp    |
+// DATA for TYPE_IMU_CAYLEY (12B, compatible with SIZE_TIMESTAMPED and SIZE_TIMESTAMPED_STATUS):
+//                |q0               |q1               |q2               |a0               |a1               |a2               |
+// DATA for TYPE_GENERIC_HID (example using full 14B using SIZE_MAX_NORMAL):
+//                |001     |Joystick X       |Joystick Y       |Trigger |Buttons |Capacitive Sensors (8x8B?)                                    |
 
-void connection_write_packet_0() // device info
+// See  PACKET_HEADER_TYPE and PACKET_RESERVED_SIZES
+
+static inline void write_header(uint8_t data[1], enum PACKET_HEADER_TYPE type)
 {
-	uint8_t data[16] = {0};
-	data[0] = 0; // packet 0
-	data[1] = tracker_id;
-	data[2] = batt;
-	data[3] = batt_v;
-	data[4] = sensor_temp; // temp
-	data[5] = FW_BOARD; // brd_id
-	data[6] = FW_MCU; // mcu_id
-	data[7] = 0; // resv
-	data[8] = imu_id; // imu_id
-	data[9] = mag_id; // mag_id
-	uint16_t *buf = (uint16_t *)&data[10];
+	data[0] = (type << 5) | (tracker_id & 0b11111);
+}
+
+static inline void write_info(uint8_t data[10])
+{
+	data[0] = FW_BOARD; // brd_id
+	data[1] = FW_MCU; // mcu_id
+	data[2] = 0; // resv
+	data[3] = imu_id; // imu_id
+	data[4] = mag_id; // mag_id
+	uint16_t *buf = (uint16_t *)&data[5];
 	buf[0] = ((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31); // fw_date
-	data[12] = FW_VERSION_MAJOR & 255; // fw_major
-	data[13] = FW_VERSION_MINOR & 255; // fw_minor
-	data[14] = FW_VERSION_PATCH & 255; // fw_patch
-	data[15] = 0; // rssi (supplied by receiver)
-	esb_write(data);
+	data[7] = FW_VERSION_MAJOR & 255; // fw_major
+	data[8] = FW_VERSION_MINOR & 255; // fw_minor
+	data[9] = FW_VERSION_PATCH & 255; // fw_patch
 }
 
-void connection_write_packet_1() // full precision quat and accel
+static inline void write_status(uint8_t data[3])
 {
-	uint8_t data[16] = {0};
-	data[0] = 1; // packet 1
-	data[1] = tracker_id;
-	uint16_t *buf = (uint16_t *)&data[2];
-	buf[0] = TO_FIXED_15(sensor_q[1]);
-	buf[1] = TO_FIXED_15(sensor_q[2]);
-	buf[2] = TO_FIXED_15(sensor_q[3]);
-	buf[3] = TO_FIXED_15(sensor_q[0]);
-	buf[4] = TO_FIXED_7(sensor_a[0]);
-	buf[5] = TO_FIXED_7(sensor_a[1]);
-	buf[6] = TO_FIXED_7(sensor_a[2]);
-	esb_write(data);
-}
-#include <zephyr/kernel.h>
-void connection_write_packet_2() // reduced precision quat and accel with battery, temp, and rssi
-{
-	uint8_t data[16] = {0};
-	data[0] = 2; // packet 2
-	data[1] = tracker_id;
-	data[2] = batt;
-	data[3] = batt_v;
-	data[4] = sensor_temp; // temp
-	float v[3] = {0};
-	q_fem(sensor_q, v); // exponential map
-	for (int i = 0; i < 3; i++)
-		v[i] = (v[i] + 1) / 2; // map -1-1 to 0-1
-	uint16_t v_buf[3] = {TO_FIXED_10(v[0]), TO_FIXED_11(v[1]), TO_FIXED_11(v[2])}; // fill 32 bits
-	uint32_t *q_buf = (uint32_t *)&data[5];
-	*q_buf = v_buf[0] | (v_buf[1] << 10) | (v_buf[2] << 21);
-
-//	v[0] = FIXED_10_TO_DOUBLE(*q_buf & 1023);
-//	v[1] = FIXED_11_TO_DOUBLE((*q_buf >> 10) & 2047);
-//	v[2] = FIXED_11_TO_DOUBLE((*q_buf >> 21) & 2047);
-//	for (int i = 0; i < 3; i++)
-//	v[i] = v[i] * 2 - 1;
-//	float q[4] = {0};
-//	q_iem(v, q); // inverse exponential map
-
-	uint16_t *buf = (uint16_t *)&data[9];
-	buf[0] = TO_FIXED_7(sensor_a[0]);
-	buf[1] = TO_FIXED_7(sensor_a[1]);
-	buf[2] = TO_FIXED_7(sensor_a[2]);
-	data[15] = 0; // rssi (supplied by receiver)
-	esb_write(data);
+	data[0] = batt;
+	data[1] = batt_v;
+	data[2] = sensor_temp;
 }
 
-void connection_write_packet_3() // status
+static inline void write_imu_cayley(uint8_t data[12])
 {
-	uint8_t data[16] = {0};
-	data[0] = 3; // packet 3
-	data[1] = tracker_id;
-	data[2] = tracker_svr_status;
-	data[3] = tracker_status;
-	data[15] = 0; // rssi (supplied by receiver)
-	esb_write(data);
+	uint16_t *buf = (uint16_t *)data;
+	float v[3];
+	q_cayley_f(sensor_q, v); // cayley transform
+	buf[0] = TO_FIXED_15(v[0]);
+	buf[1] = TO_FIXED_15(v[1]);
+	buf[2] = TO_FIXED_15(v[2]);
+	buf[3] = TO_FIXED_7(sensor_a[0]);
+	buf[4] = TO_FIXED_7(sensor_a[1]);
+	buf[5] = TO_FIXED_7(sensor_a[2]);
+}
+
+static inline void write_timestamps(uint8_t data[3])
+{
+	uint16_t ts_imu = (sensor_timestamp_us >> 2) & 0x0FFF;
+	uint16_t ts_last = (tx_timestamp >> 2) & 0x0FFF;
+	if (tx_errors) ts_last = 0;
+	data[0] = ts_imu >> 4;
+	data[1] = ((ts_imu&0xF) << 4) | (ts_last >> 8);
+	data[2] = ts_last & 0xFF;
+}
+
+void connection_write_info_status()
+{
+	uint8_t data[14];
+	write_header(data, TYPE_INFO_STATUS);
+	write_info(data+1);
+	write_status(data+1+10);
+	esb_write(data, sizeof(data));
+}
+
+void connection_write_sensors()
+{
+	uint8_t data[13];
+	write_header(data, TYPE_IMU_CAYLEY);
+	write_imu_cayley(data+1);
+	esb_write(data, sizeof(data));
+}
+
+void connection_write_sensors_timestamped()
+{
+	uint8_t data[SIZE_TIMESTAMPED];
+	write_header(data, TYPE_IMU_CAYLEY);
+	write_imu_cayley(data+1);
+	write_timestamps(data+1+12);
+	esb_write(data, sizeof(data));
+}
+
+void connection_write_sensors_timestamped_status()
+{
+	uint8_t data[SIZE_TIMESTAMPED_STATUS];
+	write_header(data, TYPE_IMU_CAYLEY);
+	write_imu_cayley(data+1);
+	write_timestamps(data+1+12);
+	write_status(data+1+12+3);
+	esb_write(data, sizeof(data));
 }
