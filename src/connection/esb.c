@@ -44,7 +44,8 @@ uint16_t led_clock = 0;
 uint32_t led_clock_offset = 0;
 
 uint32_t tx_errors = 0;
-uint64_t tx_timestamp = 0;
+uint64_t last_tx_time_us = 0;
+uint64_t last_tx_start_us;
 
 static struct esb_payload rx_payload;
 static struct esb_payload tx_payload;
@@ -60,16 +61,17 @@ void event_handler(struct esb_evt const *event)
 	switch (event->evt_id)
 	{
 	case ESB_EVENT_TX_SUCCESS:
-		tx_timestamp = k_ticks_to_us_floor64(k_uptime_ticks());
+		last_tx_time_us = k_ticks_to_us_floor64(k_uptime_ticks());
 		if (tx_errors >= 100)
 			set_status(SYS_STATUS_CONNECTION_ERROR, false);
 		tx_errors = 0;
+		LOG_DBG("Sent TX packet from %lldus ago (last sensor sample %lld ago)!", last_tx_time_us-last_tx_start_us, last_tx_time_us-last_sensor_timestamp);
 		break;
 	case ESB_EVENT_TX_FAILED:
-		tx_timestamp = 0;
+		last_tx_time_us = 0;
 		if (++tx_errors == 100) // consecutive failure to transmit
 			set_status(SYS_STATUS_CONNECTION_ERROR, true);
-		LOG_DBG("TX FAILED");
+		LOG_DBG("Failed to send TX packet from %lldus ago (last sensor sample %lld ago)!", last_tx_time_us-last_tx_start_us, last_tx_time_us-last_sensor_timestamp);
 		break;
 	case ESB_EVENT_RX_RECEIVED:
 		if (!esb_read_rx_payload(&rx_payload)) // zero, rx success
@@ -392,6 +394,7 @@ void esb_write(uint8_t *data, uint8_t size)
 	tx_payload.length = size;
 	esb_write_payload(&tx_payload); // Add transmission to queue
 	send_data = true;
+	last_tx_start_us = k_ticks_to_us_floor64(k_uptime_ticks());
 }
 
 bool esb_ready(void)

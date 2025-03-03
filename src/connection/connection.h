@@ -44,6 +44,8 @@ enum PACKET_RESERVED_SIZES
 	// Packets of SIZE_TIMESTAMPED_STATUS are the same except they also update a 3-byte status
 };
 
+extern uint64_t last_sensor_timestamp;
+
 uint8_t connection_get_id(void);
 void connection_set_id(uint8_t id);
 

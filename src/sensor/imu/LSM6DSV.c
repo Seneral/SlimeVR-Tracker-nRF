@@ -51,7 +51,7 @@ int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_ti
 	cur_time_slot = 0;
 	track_time_slot = 0;
 	err |= update_time_scale();
-	*timestep_us = 1.0f/MAX(DSV_ODR_GYRO_MAP[last_gyro_odr], DSV_ODR_ACCEL_MAP[last_accel_odr]);
+	*timestep_us = 1000000.0f/MAX(DSV_ODR_GYRO_MAP[last_gyro_odr], DSV_ODR_ACCEL_MAP[last_accel_odr]);
 	// Enable Continuous mode, with lowest ODR for timestamp and temperature
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_FIFO_CTRL4, 0xC0 | 0x10 | 0x06);
 	// Enable timestamp (else timestamp packets will be 0)

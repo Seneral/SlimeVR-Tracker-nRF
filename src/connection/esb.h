@@ -39,7 +39,8 @@ extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
 // TX stats
 extern uint32_t tx_errors;
-extern uint64_t tx_timestamp;
+extern uint64_t last_tx_time_us;
+extern uint64_t last_tx_start_us;
 
 void event_handler(struct esb_evt const* event);
 int clocks_start(void);

@@ -31,6 +31,8 @@ static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3];
 static uint64_t sensor_timestamp_us = 0;
 
+uint64_t last_sensor_timestamp; // Timestamp of last sensor sample actually sent
+
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
 uint8_t connection_get_id(void)
@@ -104,7 +106,7 @@ void connection_update_status(int status)
 
 // Building blocks: Status (3B), Info (10B), Timestamps (3B), Data(1-14B) - e.g. IMU(12B)
 // LEN:  |t:3|id:5|b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |b16     |b17     |b18     |
-//    8: |00000000|Checksum|pairing adress                                       |
+//    9: |00000000|Checksum|id      |pairing adress                                       |
 //   14: |001|id  |brd_id  |mcu_id  |RESV    |imu_id  |mag_id  |fw_date          |major   |minor   |patch   |batt    |batt_v  |temp    |
 // <=15: |XXX|id  |DATA (up to 14B)                                                                                                             |
 //   16: |XXX|id  |DATA (12B)                                                                                                 |timestamp imu[12] last[12]|
@@ -158,7 +160,7 @@ static inline void write_imu_cayley(uint8_t data[12])
 static inline void write_timestamps(uint8_t data[3])
 {
 	uint16_t ts_imu = (sensor_timestamp_us >> 2) & 0x0FFF;
-	uint16_t ts_last = (tx_timestamp >> 2) & 0x0FFF;
+	uint16_t ts_last = (last_tx_time_us >> 2) & 0x0FFF;
 	if (tx_errors) ts_last = 0;
 	data[0] = ts_imu >> 4;
 	data[1] = ((ts_imu&0xF) << 4) | (ts_last >> 8);
@@ -176,6 +178,7 @@ void connection_write_info_status()
 
 void connection_write_sensors()
 {
+	last_sensor_timestamp = sensor_timestamp_us;
 	uint8_t data[13];
 	write_header(data, TYPE_IMU_CAYLEY);
 	write_imu_cayley(data+1);
@@ -184,6 +187,7 @@ void connection_write_sensors()
 
 void connection_write_sensors_timestamped()
 {
+	last_sensor_timestamp = sensor_timestamp_us;
 	uint8_t data[SIZE_TIMESTAMPED];
 	write_header(data, TYPE_IMU_CAYLEY);
 	write_imu_cayley(data+1);
@@ -193,6 +197,7 @@ void connection_write_sensors_timestamped()
 
 void connection_write_sensors_timestamped_status()
 {
+	last_sensor_timestamp = sensor_timestamp_us;
 	uint8_t data[SIZE_TIMESTAMPED_STATUS];
 	write_header(data, TYPE_IMU_CAYLEY);
 	write_imu_cayley(data+1);
