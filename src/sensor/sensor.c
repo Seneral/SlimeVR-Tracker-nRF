@@ -557,6 +557,8 @@ static int process_burdened = 0;
 
 static uint32_t latest_timestep_gyro = 0, latest_timestep_accel = 0, latest_timestep_mag = 0;
 static float latest_gyro[3], latest_accel[3], latest_mag[3];
+static float global_accel[3];
+static int global_accel_samples;
 
 static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 {
@@ -624,10 +626,19 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
 
 			float dt = (float)(packet.timestep - latest_timestep_accel)*timestep_us;
-			sensor_fusion->update_accel(a, dt/1000000.0f);
-
 			latest_timestep_accel = packet.timestep;
 			memcpy(latest_accel, a, sizeof(a));
+
+			sensor_fusion->update_accel(a, dt/1000000.0f);
+
+			// Update acceleration in global coordinates
+			float lin_a[3], cur_q[4];
+			sensor_fusion->get_quat(cur_q);
+			q_normalize(cur_q, cur_q);  // safe to use self as output
+			v_rotate(a, cur_q, lin_a);
+			for (int i = 0; i < 3; i++)
+				global_accel[i] = (global_accel[i] * (float)global_accel_samples + lin_a[i]) / (float)(global_accel_samples+1);
+			global_accel_samples++;
 			break;
 		}
 		case SENSOR_TEMP:
@@ -691,6 +702,9 @@ void main_imu_thread(void) {
 				sensor_mag->mag_oneshot(&sensor_mag_dev);
 			}
 
+			// global_accel will be replaced by new average if and only if there are new accel samples
+			global_accel_samples = 0;
+
 			// Fetch all packets currently in FIFO
 			max_gyro_speed_square = 0;
 			uint64_t timestamp_read = k_uptime_ticks();
@@ -745,19 +759,13 @@ void main_imu_thread(void) {
 				sensor_fusion->get_quat(q);
 				q_normalize(q, q);  // safe to use self as output
 
-				// Get linear acceleration
-				float lin_a[3] = {0};
-				float vec_gravity[3] = {0};
-				vec_gravity[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
-				vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
-				vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
+				float q_out[4], a_out[3];
+				q_multiply(q, q3, q_out);
+				// global_accel may not have been updated since last loop, so never modify here!
 				for (int i = 0; i < 3; i++)
-					lin_a[i] = (latest_accel[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
-
-				float q_offset[4];
-				q_multiply(q, q3, q_offset);
-				v_rotate(lin_a, q3, lin_a);
-				connection_update_sensor_data(q_offset, lin_a, synced_time_us);
+					a_out[i] = global_accel[i] * CONST_EARTH_GRAVITY; // vector to m/s^2
+				a_out[2] -= CONST_EARTH_GRAVITY;
+				connection_update_sensor_data(q_out, a_out, synced_time_us);
 			}
 
 			// Control rates of certain packets
