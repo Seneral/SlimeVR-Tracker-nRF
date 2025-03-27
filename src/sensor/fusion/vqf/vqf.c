@@ -71,17 +71,16 @@ void vqf_save(void* data) {
 }
 
 void vqf_update_gyro(float* g, float time) {
-	// TODO: time unused?
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++) {
 		g_rad[i] = g[i] * DEG_TO_RAD;
 	}
+	coeffs.gyrTs = time;
 	updateGyr(&params, &state, &coeffs, g_rad);
 }
 
 void vqf_update_accel(float* a, float time) {
-	// TODO: time unused?
 	// TODO: how to handle change in sample rate
 	float a_m_s2[3] = {0};
 	// a is in g, convert to m/s^2
@@ -91,11 +90,12 @@ void vqf_update_accel(float* a, float time) {
 	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0) {
 		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
 	}
+	coeffs.accTs = time;
 	updateAcc(&params, &state, &coeffs, a_m_s2);
 }
 
 void vqf_update_mag(float* m, float time) {
-	// TODO: time unused?
+	coeffs.magTs = time;
 	updateMag(&params, &state, &coeffs, m);
 }
 

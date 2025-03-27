@@ -585,7 +585,7 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			float g[] = {SENSOR_GYROSCOPE_AXES_ALIGNMENT};
 
 			float dt = (float)(packet.timestep - latest_timestep_gyro)*timestep_us;
-			sensor_fusion->update_gyro(g, dt);
+			sensor_fusion->update_gyro(g, dt/1000000.0f);
 
 			latest_timestep_gyro = packet.timestep;
 			memcpy(latest_gyro, g, sizeof(g));
@@ -624,7 +624,7 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
 
 			float dt = (float)(packet.timestep - latest_timestep_accel)*timestep_us;
-			sensor_fusion->update_accel(a, dt);
+			sensor_fusion->update_accel(a, dt/1000000.0f);
 
 			latest_timestep_accel = packet.timestep;
 			memcpy(latest_accel, a, sizeof(a));
@@ -649,7 +649,7 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
 
 			float dt = (float)(packet.timestep - latest_timestep_mag)*timestep_us;
-			sensor_fusion->update_mag(m, dt);
+			sensor_fusion->update_mag(m, dt/1000000.0f);
 
 			latest_timestep_mag = packet.timestep;
 			memcpy(latest_mag, m, sizeof(m));
