@@ -149,6 +149,8 @@ static inline void write_imu_cayley(uint8_t data[12])
 	uint16_t *buf = (uint16_t *)data;
 	float v[3];
 	q_cayley_f(sensor_q, v); // cayley transform
+	//q_fem(sensor_q, v); // exponential map
+	// Now map [-1, 1] to fixed-point int16
 	buf[0] = TO_FIXED_15(v[0]);
 	buf[1] = TO_FIXED_15(v[1]);
 	buf[2] = TO_FIXED_15(v[2]);

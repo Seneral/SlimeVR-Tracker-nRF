@@ -93,10 +93,16 @@ config WOM_USE_DCDC
         Use DCDC instead of LDO in IMU wake up state if it is more efficient.
 
 config SENSOR_FUSION_ODR
-    int "Fusion output data rate (Hz)"
+    int "Fusion processing data rate (Hz)"
+    default 800
+    help
+        The rate at which all packets are fetched and fused
+
+config SENSOR_SEND_ODR
+    int "ESB output data rate (Hz)"
     default 200
     help
-        The rate at which all packets are fused and sent to receiver
+        The rate at which the updates state is sent to the receiver
 
 config SENSOR_ACCEL_ODR
     int "Accelerometer output data rate (Hz)"

@@ -42,7 +42,7 @@ int lsm_init(const struct i2c_dt_spec *dev_i2c, float clock_rate, float accel_ti
 	err |= i2c_reg_write_byte_dt(dev_i2c, LSM6DSV_CTRL8, DSV_FS_XL_16G); // set accel FS
 	// Initialise ODRs
 	last_accel_odr = last_gyro_odr = 0xff; // reset last odr
-	last_accel_bdr = last_gyro_bdr = last_ext_bdr = 0; // reset last bdr
+	last_accel_bdr = last_gyro_bdr = last_ext_bdr = 0xff; // reset last bdr
 	err |= lsm_update_odr(dev_i2c, accel_time, gyro_time, accel_actual_time, gyro_actual_time);
 	// Set initial BDR, any later changes should be detected via FIFO packets
 	last_accel_bdr = last_accel_odr;
@@ -92,7 +92,7 @@ int lsm_update_odr(const struct i2c_dt_spec *dev_i2c, float accel_time, float gy
 		ODR_XL = DSV_ODR_1_875Hz;
 		float desiredODR = 1 / accel_time;
 		for (int i = 0; i < sizeof(DSV_ODR_ACCEL_MAP)/sizeof(float); i++)
-	{
+		{
 			if (desiredODR > DSV_ODR_ACCEL_MAP[i] && DSV_ODR_ACCEL_MAP[i] > DSV_ODR_ACCEL_MAP[ODR_XL])
 				ODR_XL = i;
 		}

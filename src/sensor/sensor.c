@@ -417,8 +417,8 @@ int i2c_update_rate = CONFIG_SENSOR_FUSION_ODR;
 int i2c_update_time_us = 1000000 / CONFIG_SENSOR_FUSION_ODR;
 int fusion_update_rate = CONFIG_SENSOR_FUSION_ODR;
 int fusion_update_time_us = 1000000 / CONFIG_SENSOR_FUSION_ODR;
-int sending_update_rate = CONFIG_SENSOR_FUSION_ODR;
-int sending_update_time_us = 1000000 / CONFIG_SENSOR_FUSION_ODR;
+int sending_update_rate = CONFIG_SENSOR_SEND_ODR;
+int sending_update_time_us = 1000000 / CONFIG_SENSOR_SEND_ODR;
 
 static void set_update_divider(int div) {
 	// TODO: Properly lower ODR or at least BDR for all sensors
@@ -426,7 +426,7 @@ static void set_update_divider(int div) {
 	//fusion_update_rate = CONFIG_SENSOR_FUSION_ODR / div;
 	//fusion_update_time_us = 1000000 / fusion_update_rate;
 	// But radio TX rate will be reduced
-	sending_update_rate = CONFIG_SENSOR_FUSION_ODR / div;
+	sending_update_rate = CONFIG_SENSOR_SEND_ODR / div;
 	sending_update_time_us = 1000000 / fusion_update_rate;
 }
 
@@ -553,6 +553,7 @@ static bool main_running = false;
 static bool main_ok = false;
 
 static int packet_errors = 0;
+static int process_burdened = 0;
 
 static uint32_t latest_timestep_gyro = 0, latest_timestep_accel = 0, latest_timestep_mag = 0;
 static float latest_gyro[3], latest_accel[3], latest_mag[3];
@@ -663,6 +664,7 @@ static void parse_sensor_packet(void *userdata, sensor_packet_t packet)
 			break;
 		}
 	}
+}
 
 void main_imu_thread(void) {
 	main_running = true;
@@ -682,9 +684,6 @@ void main_imu_thread(void) {
 	while (1) {
 		uint64_t ticks_begin = k_uptime_ticks();
 		if (main_ok) {
-			// Trigger reconfig on sensor mode change
-			bool reconfig = last_sensor_mode != sensor_mode;
-			last_sensor_mode = sensor_mode;
 
 			// At high speed, use oneshot mode to have synced magnetometer data
 			// Call before FIFO and get the data after
@@ -696,96 +695,106 @@ void main_imu_thread(void) {
 			max_gyro_speed_square = 0;
 			uint64_t timestamp_read = k_uptime_ticks();
 			int processed_packets = sensor_imu->fetch_sensor_packets(&sensor_imu_dev, 1000, parse_sensor_packet, NULL);
-			if (processed_packets > 0)
-			{
-				packet_errors = 0;
-			}
-			else
+			if (processed_packets == 0)
 			{ // No packets
-				LOG_WRN("No packets processed");
-				if (++packet_errors == 10) {
+				if (++packet_errors >= 10) {
 					LOG_ERR("Packet error threshold exceeded");
 					set_status(SYS_STATUS_SENSOR_ERROR, true);  // kind of redundant
 					sensor_retained_write();  // keep the fusion state
+					k_msleep(5000);	
 					sys_request_system_reboot();
 				}
+				else if (packet_errors > 2)
+				{
+					LOG_WRN("No packets processed");
+				}
+				memcpy(q, last_q, sizeof(q));
+			}
+			else
+			{ // Got accel/gyro packets to parse
+				packet_errors = 0;
+
+				if (mag_available && mag_enabled
+					&& sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE)
+				{ // Read oneshot manually
+					// TODO: Integrate properly in correct timely manner
+					// Could be via main IMU EXT (IMU as sensor hub)
+					// Or by making oneshot generate an interrupt at which to call then
+					// Just need to take care of any callback priority conflicts then
+					sensor_packet_t packet;
+					packet.tag = SENSOR_MAG;
+					sensor_mag->mag_read(&sensor_mag_dev, packet.data.mag);
+					packet.timestep = latest_timestep; // Best approximation for time
+					parse_sensor_packet(NULL, packet);
+				}
+
+				// Update synchronised time
+				// Timestamp of reading fifo size is the best estimate of timestamp of last packet in fifo
+				latest_timestamp = timestamp_read;
+				uint64_t cur_timestamp_us = k_ticks_to_us_floor64(latest_timestamp); // Uses z_tmcvt_gen_64_fast in default config
+				//uint32_t cur_timestamp_us = k_ticks_to_us_floor32(latest_timestamp); // Could also use, but overflows in an hour
+				// latest_timestep overflows in 60days using timestep interval of 800Hz
+				// So we can avoid any sort of timestep rebasing that is usually required
+				uint64_t synced_time_us = update_time_synced(&timesync, latest_timestep, cur_timestamp_us);
+				// This is the best guess of the time the last sensor was written to the fifo, mapped to this nRFs uptime in us
+				// This can then be used to further propagate that synced time to the receiver, then to the host OS
+				//LOG_INF("Timestep %d with measurement %lldus mapped to %lldus - factor %.3f",
+				//	latest_timestep, cur_timestamp_us, synced_time_us, timesync.factor);
+
+				// Get updated quaternion from fusion
+				sensor_fusion->get_quat(q);
+				q_normalize(q, q);  // safe to use self as output
+
+				// Get linear acceleration
+				float lin_a[3] = {0};
+				float vec_gravity[3] = {0};
+				vec_gravity[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
+				vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
+				vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
+				for (int i = 0; i < 3; i++)
+					lin_a[i] = (latest_accel[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
+
+				float q_offset[4];
+				q_multiply(q, q3, q_offset);
+				v_rotate(lin_a, q3, lin_a);
+				connection_update_sensor_data(q_offset, lin_a, synced_time_us);
 			}
 
-			if (mag_available && mag_enabled
-				&& sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE)
-			{ // Read oneshot manually
-				// TODO: Integrate properly in correct timely manner
-				// Could be via main IMU EXT (IMU as sensor hub)
-				// Or by making oneshot generate an interrupt at which to call then
-				// Just need to take care of any callback priority conflicts then
-				sensor_packet_t packet;
-				packet.tag = SENSOR_MAG;
-				sensor_mag->mag_read(&sensor_mag_dev, packet.data.mag);
-				packet.timestep = latest_timestep; // Best approximation for time
-				parse_sensor_packet(NULL, packet);
+			// Control rates of certain packets
+			uint64_t ticks_now = k_uptime_ticks();
+			uint64_t dt_info = ticks_now - last_info_ticks;
+			uint64_t dt_status = ticks_now - last_status_ticks;
+			uint64_t dt_sensor = ticks_now - last_sensor_ticks;
+			bool want_info, want_status, want_sensor, need_sensor;
+			if (tx_errors < 100) { // Receiver is active
+				want_info = dt_info > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC; // 1s
+				want_status = dt_status > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/2; // 500ms
+				want_sensor = processed_packets > 0 && dt_sensor+200 > sending_update_time_us*CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/1000000;
+				need_sensor = processed_packets > 0 && dt_sensor+200 > sending_update_time_us*CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/1000000*2;
+			} else {
+				want_info = dt_info > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC; // 1s
+				want_status = dt_status > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC; // 1s
+				want_sensor = need_sensor = false;
 			}
 
-			if (reconfig)
-			{
-				switch (sensor_mode) {
-					case SENSOR_SENSOR_MODE_LOW_NOISE:
-						set_update_divider(1);
-						LOG_INF("Switching sensors to low noise");
-						break;
-					case SENSOR_SENSOR_MODE_LOW_POWER:
-						set_update_divider(4);
-						LOG_INF("Switching sensors to low power 1");
-						if (mag_available && mag_enabled) {
-							sensor_mag->update_odr(
-								&sensor_mag_dev,
-								INFINITY,
-								&mag_actual_time
-							);  // standby/oneshot
-						}
-						break;
-					case SENSOR_SENSOR_MODE_LOW_POWER_2:
-						set_update_divider(16);
-						LOG_INF("Switching sensors to low power 2");
-						if (mag_available && mag_enabled) {
-							sensor_mag->update_odr(
-								&sensor_mag_dev,
-								INFINITY,
-								&mag_actual_time
-							);  // standby/oneshot
-						}
-						break;
-				};
+			// Send packet with new orientation
+			if (need_sensor || (want_sensor && !q_epsilon(q, last_q, 0.001))) {
+				if (want_status) {
+					connection_write_sensors_timestamped_status();
+					last_sensor_ticks = last_status_ticks = ticks_now;
+				} else {
+					connection_write_sensors_timestamped();
+					last_sensor_ticks = ticks_now;
+				}
+			} else if (want_info || want_status) {
+				connection_write_info_status();
+				last_info_ticks = last_status_ticks = ticks_now;
 			}
 
-			// Update synchronised time
-			// Timestamp of reading fifo size is the best estimate of timestamp of last packet in fifo
-			latest_timestamp = timestamp_read;
-			uint64_t cur_timestamp_us = k_ticks_to_us_floor64(latest_timestamp); // Uses z_tmcvt_gen_64_fast in default config
-			//uint32_t cur_timestamp_us = k_ticks_to_us_floor32(latest_timestamp); // Could also use, but overflows in an hour
-			// latest_timestep overflows in 60days using timestep interval of 800Hz
-			// So we can avoid any sort of timestep rebasing that is usually required
-			uint64_t synced_time_us = update_time_synced(&timesync, latest_timestep, cur_timestamp_us);
-			// This is the best guess of the time the last sensor was written to the fifo, mapped to this nRFs uptime in us
-			// This can then be used to further propagate that synced time to the receiver, then to the host OS
-			//LOG_INF("Timestep %d with measurement %lldus mapped to %lldus - factor %.3f",
-			//	latest_timestep, cur_timestamp_us, synced_time_us, timesync.factor);
-
-			// Get updated quaternion from fusion
-			sensor_fusion->get_quat(q);
-			q_normalize(q, q);  // safe to use self as output
-
-			// Get linear acceleration
-			float lin_a[3] = {0};
-			float vec_gravity[3] = {0};
-			vec_gravity[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
-			vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
-			vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
-			for (int i = 0; i < 3; i++)
-				lin_a[i] = (latest_accel[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
 
 			// Check the IMU gyroscope
 			float eps = sensor_fusion->get_gyro_sanity() == 0? 0.005f : 0.05f;
-			if (q_epsilon(q, last_q, eps))
+			if (processed_packets > 0 && q_epsilon(q, last_q, eps))
 			{ // Probably okay to use the constantly updating last_q
 				int64_t imu_timeout = CLAMP(
 					last_motion_time - last_lp2_time,
@@ -818,6 +827,41 @@ void main_imu_thread(void) {
 				last_motion_time = k_uptime_get();
 				sensor_mode = SENSOR_SENSOR_MODE_LOW_NOISE;
 			}
+
+			memcpy(last_q, q, sizeof(q));
+
+			if (last_sensor_mode != sensor_mode)
+			{ // Trigger reconfig on sensor mode change
+				switch (sensor_mode) {
+					case SENSOR_SENSOR_MODE_LOW_NOISE:
+						set_update_divider(1);
+						LOG_INF("Switching sensors to low noise");
+						break;
+					case SENSOR_SENSOR_MODE_LOW_POWER:
+						set_update_divider(4);
+						LOG_INF("Switching sensors to low power 1");
+						if (mag_available && mag_enabled) {
+							sensor_mag->update_odr(
+								&sensor_mag_dev,
+								INFINITY,
+								&mag_actual_time
+							);  // standby/oneshot
+						}
+						break;
+					case SENSOR_SENSOR_MODE_LOW_POWER_2:
+						set_update_divider(16);
+						LOG_INF("Switching sensors to low power 2");
+						if (mag_available && mag_enabled) {
+							sensor_mag->update_odr(
+								&sensor_mag_dev,
+								INFINITY,
+								&mag_actual_time
+							);  // standby/oneshot
+						}
+						break;
+				};
+			}
+			last_sensor_mode = sensor_mode;
 
 			// Update magnetometer mode
 			if (mag_available && mag_enabled
@@ -854,42 +898,6 @@ void main_imu_thread(void) {
 				}
 			}
 
-			// Control rates of certain packets
-			uint64_t ticks_now = k_uptime_ticks();
-			uint64_t dt_info = ticks_now - last_info_ticks;
-			uint64_t dt_status = ticks_now - last_status_ticks;
-			uint64_t dt_sensor = ticks_now - last_sensor_ticks;
-			bool want_info, want_status, want_sensor, need_sensor;
-			if (tx_errors < 100) { // Receiver is active
-				want_info = dt_info > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC; // 1s
-				want_status = dt_status > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/2; // 500ms
-				want_sensor = dt_sensor+200 > sending_update_time_us*CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/1000000;
-				need_sensor = dt_sensor+200 > sending_update_time_us*CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/1000000*2;
-			} else {
-				want_info = dt_info > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC; // 1s
-				want_status = dt_status > CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC; // 1s
-				want_sensor = need_sensor = false;
-			}
-
-			// Send packet with new orientation
-			if (need_sensor || (want_sensor && !q_epsilon(q, last_q, 0.001))) {
-				memcpy(last_q, q, sizeof(q));
-				float q_offset[4];
-				q_multiply(q, q3, q_offset);
-				v_rotate(lin_a, q3, lin_a);
-				connection_update_sensor_data(q_offset, lin_a, synced_time_us);
-				if (want_status) {
-					connection_write_sensors_timestamped_status();
-					last_sensor_ticks = last_status_ticks = ticks_now;
-				} else {
-					connection_write_sensors_timestamped();
-					last_sensor_ticks = ticks_now;
-				}
-			} else if (want_info || want_status) {
-				connection_write_info_status();
-				last_info_ticks = last_status_ticks = ticks_now;
-			}
-
 			// Handle magnetometer calibration or bridge offset calibration
 			if (mag_available && mag_enabled
 				&& last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER
@@ -915,7 +923,12 @@ void main_imu_thread(void) {
 		//		led_clock_offset += time_delta;
 		if (time_delta_us > fusion_update_time_us) {
 			k_yield();
+			if ((process_burdened++)%1000 == 10) {
+				LOG_WRN("Processor has been overburdened for %d loops!", process_burdened);
+			}
+
 		} else {
+			process_burdened = 0;
 			k_usleep(fusion_update_time_us - time_delta_us);
 		}
 		main_running = true;
