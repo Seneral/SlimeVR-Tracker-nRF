@@ -749,7 +749,16 @@ void main_imu_thread(void) {
 				//uint32_t cur_timestamp_us = k_ticks_to_us_floor32(latest_timestamp); // Could also use, but overflows in an hour
 				// latest_timestep overflows in 60days using timestep interval of 800Hz
 				// So we can avoid any sort of timestep rebasing that is usually required
-				uint64_t synced_time_us = update_time_synced(&timesync, latest_timestep, cur_timestamp_us);
+				uint64_t synced_time_us;
+				if (latest_timestep == 0)
+				{ // If driver does not support timestamps/timeslots, just take time we queried the IMU as the sample timestamp
+					synced_time_us = cur_timestamp_us;
+				}
+				else
+				{ // Driver provided SOME measure of timestamp - might just be a timeslot that increases by 1 on every fixed increase in timestamp
+					// The following code will then map those timeslots to the local time in US
+					synced_time_us = update_time_synced(&timesync, latest_timestep, cur_timestamp_us);
+				}
 				// This is the best guess of the time the last sensor was written to the fifo, mapped to this nRFs uptime in us
 				// This can then be used to further propagate that synced time to the receiver, then to the host OS
 				//LOG_INF("Timestep %d with measurement %lldus mapped to %lldus - factor %.3f",
